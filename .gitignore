@@ -212,3 +212,6 @@ __marimo__/
 .omc/notepad.md
 .omc/logs/
 .omc/research/
+
+# Overnight verification run state (ephemeral logs, PIDs, per-run JSON)
+var/
