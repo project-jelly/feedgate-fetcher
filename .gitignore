@@ -215,3 +215,6 @@ __marimo__/
 
 # Overnight verification run state (ephemeral logs, PIDs, per-run JSON)
 var/
+
+# Claude Code local cache / state
+.claude/
