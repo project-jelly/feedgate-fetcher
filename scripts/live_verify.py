@@ -27,6 +27,7 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import json
 import os
@@ -78,11 +79,9 @@ async def check_healthz(client: httpx.AsyncClient) -> CheckResult:
         r = await client.get("/healthz", timeout=5)
     except Exception as e:
         return CheckResult("healthz", False, f"exception: {e!r}")
-    body = {}
-    try:
+    body: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
         body = r.json()
-    except Exception:
-        pass
     ok = r.status_code == 200 and body.get("status") == "ok"
     return CheckResult("healthz", ok, f"HTTP {r.status_code}")
 
@@ -136,9 +135,7 @@ async def check_missing_feed_404(client: httpx.AsyncClient) -> CheckResult:
         r = await client.get("/v1/feeds/9999999", timeout=5)
     except Exception as e:
         return CheckResult("feed_missing_404", False, f"exception: {e!r}")
-    return CheckResult(
-        "feed_missing_404", r.status_code == 404, f"HTTP {r.status_code}"
-    )
+    return CheckResult("feed_missing_404", r.status_code == 404, f"HTTP {r.status_code}")
 
 
 async def check_idempotent_post(client: httpx.AsyncClient, url: str) -> CheckResult:
@@ -205,9 +202,7 @@ async def check_entries_aggregate(
     return CheckResult("entries_aggregate", True, f"{len(items)} entries"), len(items)
 
 
-async def check_cursor_walk(
-    client: httpx.AsyncClient, feed_id: int
-) -> CheckResult:
+async def check_cursor_walk(client: httpx.AsyncClient, feed_id: int) -> CheckResult:
     """Page through one feed with limit=2, assert uniqueness and monotonicity."""
     seen: set[str] = set()
     cursor: str | None = None
@@ -220,19 +215,13 @@ async def check_cursor_walk(
         try:
             r = await client.get("/v1/entries", params=params, timeout=10)
         except Exception as e:
-            return CheckResult(
-                "cursor_walk", False, f"exception on page {pages}: {e!r}"
-            )
+            return CheckResult("cursor_walk", False, f"exception on page {pages}: {e!r}")
         if r.status_code != 200:
-            return CheckResult(
-                "cursor_walk", False, f"HTTP {r.status_code} on page {pages}"
-            )
+            return CheckResult("cursor_walk", False, f"HTTP {r.status_code} on page {pages}")
         body = r.json()
         for e in body.get("items", []):
             if e["guid"] in seen:
-                return CheckResult(
-                    "cursor_walk", False, f"duplicate guid {e['guid']}"
-                )
+                return CheckResult("cursor_walk", False, f"duplicate guid {e['guid']}")
             seen.add(e["guid"])
             cur_published = e.get("published_at")
             if (
@@ -250,9 +239,7 @@ async def check_cursor_walk(
         pages += 1
         if not cursor:
             break
-    return CheckResult(
-        "cursor_walk", True, f"{pages} pages, {len(seen)} unique entries"
-    )
+    return CheckResult("cursor_walk", True, f"{pages} pages, {len(seen)} unique entries")
 
 
 # --- DB invariant checks ----------------------------------------------------
@@ -347,11 +334,7 @@ async def check_db_invariants() -> list[CheckResult]:
 
 async def run_report() -> RunReport:
     t0 = time.monotonic()
-    ts = (
-        dt.datetime.now(dt.UTC)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
+    ts = dt.datetime.now(dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     report = RunReport(timestamp=ts, api_base=API_BASE, duration_ms=0)
 
     async with httpx.AsyncClient(base_url=API_BASE) as client:
@@ -398,12 +381,8 @@ async def run_report() -> RunReport:
         report.checks.append(CheckResult("db_invariants", False, f"exception: {e!r}"))
 
     report.stats["feeds_total"] = len(feed_ids)
-    report.stats["feeds_with_success"] = sum(
-        1 for f in feeds if f.get("last_successful_fetch_at")
-    )
-    report.stats["feeds_with_error"] = sum(
-        1 for f in feeds if f.get("last_error_code")
-    )
+    report.stats["feeds_with_success"] = sum(1 for f in feeds if f.get("last_successful_fetch_at"))
+    report.stats["feeds_with_error"] = sum(1 for f in feeds if f.get("last_error_code"))
 
     report.duration_ms = int((time.monotonic() - t0) * 1000)
     return report

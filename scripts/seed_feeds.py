@@ -83,10 +83,7 @@ def main() -> int:
             print(f"  !  [{category:17}] HTTP {status}: {url}")
 
     total = len(SEED_FEEDS)
-    print(
-        f"\nTotal {total} | created {created} | existing {existing} | "
-        f"failed {len(failed)}"
-    )
+    print(f"\nTotal {total} | created {created} | existing {existing} | failed {len(failed)}")
     if failed:
         print("\nFailed URLs:")
         for cat, url, status, body in failed:
