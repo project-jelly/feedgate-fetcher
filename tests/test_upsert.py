@@ -12,6 +12,7 @@ Covers the four cases from plan WP 1.5:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -38,7 +39,7 @@ async def _entry_row(session: AsyncSession, feed_id: int, guid: str) -> Entry:
     return result.scalar_one()
 
 
-async def _entry_snapshot(session: AsyncSession, feed_id: int, guid: str) -> dict[str, object]:
+async def _entry_snapshot(session: AsyncSession, feed_id: int, guid: str) -> dict[str, Any]:
     """Read entry fields as a plain dict, bypassing the ORM identity map.
 
     Used in the "upsert twice" tests so the second read isn't tainted by

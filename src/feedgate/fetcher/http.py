@@ -31,6 +31,7 @@ import logging
 from datetime import datetime, timedelta
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
@@ -58,7 +59,7 @@ def _classify_error(exc: BaseException) -> str:
 
 
 async def fetch_one(
-    session,  # sqlalchemy AsyncSession; avoid circular annotations
+    session: AsyncSession,
     http_client: httpx.AsyncClient,
     feed: Feed,
     *,

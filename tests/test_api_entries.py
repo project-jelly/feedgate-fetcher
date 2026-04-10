@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,7 +18,7 @@ from feedgate.models import Entry, Feed
 
 @pytest_asyncio.fixture
 async def seeded_feed(
-    api_app,
+    api_app: FastAPI,
     async_session_factory: async_sessionmaker[AsyncSession],
     truncate_tables: None,
 ) -> int:

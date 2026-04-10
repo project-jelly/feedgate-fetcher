@@ -46,7 +46,7 @@ def pg_container() -> Iterator[PostgresContainer]:
 @pytest.fixture(scope="session")
 def database_url(pg_container: PostgresContainer) -> str:
     """asyncpg-flavored connection URL for the session's Postgres."""
-    raw = pg_container.get_connection_url()
+    raw: str = str(pg_container.get_connection_url())
     # testcontainers gives us a psycopg-flavored URL; rewrite for asyncpg.
     return raw.replace("postgresql+psycopg2://", "postgresql+asyncpg://").replace(
         "postgresql://", "postgresql+asyncpg://"

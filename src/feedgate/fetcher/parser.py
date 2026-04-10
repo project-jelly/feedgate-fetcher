@@ -32,8 +32,8 @@ def _struct_time_to_datetime(st: Any) -> datetime | None:
     if st is None:
         return None
     try:
-        return datetime(*st[:6], tzinfo=UTC)
-    except (TypeError, ValueError):
+        return datetime(st[0], st[1], st[2], st[3], st[4], st[5], tzinfo=UTC)
+    except (TypeError, ValueError, IndexError):
         return None
 
 

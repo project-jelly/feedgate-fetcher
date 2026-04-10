@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 
 import pytest
+import respx
 from httpx import ASGITransport, AsyncClient
 from testcontainers.postgres import PostgresContainer
 
@@ -47,7 +48,7 @@ ATOM_BODY = """<?xml version="1.0" encoding="utf-8"?>
 @pytest.mark.asyncio
 async def test_walking_skeleton_happy_path(
     pg_container: PostgresContainer,
-    respx_mock,  # provided by the respx pytest plugin
+    respx_mock: respx.Router,
     truncate_tables: None,  # ensure a clean feeds/entries table
 ) -> None:
     """Register a feed, run one scheduler tick, verify entries appear via API.
