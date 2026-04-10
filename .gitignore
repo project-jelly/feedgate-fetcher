@@ -205,3 +205,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# OMC workflow state (keep specs/plans, ignore ephemeral session state)
+.omc/state/
+.omc/project-memory.json
+.omc/notepad.md
+.omc/logs/
+.omc/research/
