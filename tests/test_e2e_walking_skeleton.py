@@ -48,6 +48,7 @@ ATOM_BODY = """<?xml version="1.0" encoding="utf-8"?>
 async def test_walking_skeleton_happy_path(
     pg_container: PostgresContainer,
     respx_mock,  # provided by the respx pytest plugin
+    truncate_tables: None,  # ensure a clean feeds/entries table
 ) -> None:
     """Register a feed, run one scheduler tick, verify entries appear via API.
 
