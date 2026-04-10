@@ -136,3 +136,27 @@ async def api_client(
         base_url="http://test",
     ) as client:
         yield client
+
+
+@pytest_asyncio.fixture
+async def fetch_app(
+    async_session_factory: async_sessionmaker[AsyncSession],
+    truncate_tables: None,
+) -> AsyncIterator[FastAPI]:
+    """A FastAPI app populated with state that ``scheduler.tick_once`` reads.
+
+    Used by Phase 4 fetcher/scheduler tests. Owns a real
+    ``httpx.AsyncClient`` — ``respx_mock`` patches its transport so no
+    real HTTP happens. The scheduler itself is NOT started; tests call
+    ``tick_once`` directly.
+    """
+    app = FastAPI()
+    app.state.session_factory = async_session_factory
+    app.state.http_client = AsyncClient()
+    app.state.fetch_interval_seconds = 60
+    app.state.fetch_user_agent = "feedgate-fetcher/test"
+    app.state.fetch_concurrency = 4
+    try:
+        yield app
+    finally:
+        await app.state.http_client.aclose()
