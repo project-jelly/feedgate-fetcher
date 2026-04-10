@@ -13,15 +13,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = (
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/feedgate"
-    )
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/feedgate"
     fetch_interval_seconds: int = 60
     fetch_timeout_seconds: float = 20.0
     fetch_max_bytes: int = 5 * 1024 * 1024
-    fetch_user_agent: str = (
-        "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
-    )
+    fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
     scheduler_enabled: bool = True
 

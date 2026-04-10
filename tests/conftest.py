@@ -13,9 +13,12 @@ The `respx_mock` fixture is provided automatically by the `respx` package.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -24,6 +27,9 @@ from sqlalchemy.ext.asyncio import (
 from testcontainers.postgres import PostgresContainer
 
 from feedgate.db import make_engine, make_session_factory
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 
 @pytest.fixture(scope="session")
@@ -43,9 +49,24 @@ def database_url(pg_container: PostgresContainer) -> str:
     )
 
 
+@pytest.fixture(scope="session")
+def apply_migrations(database_url: str) -> str:
+    """Run Alembic `upgrade head` once per session.
+
+    Returns the database URL so downstream fixtures can depend on this
+    fixture to ensure migrations have been applied before they touch
+    the schema.
+    """
+    cfg = Config(str(ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(cfg, "head")
+    return database_url
+
+
 @pytest_asyncio.fixture(scope="session")
-async def async_engine(database_url: str) -> AsyncIterator[AsyncEngine]:
-    engine = make_engine(database_url)
+async def async_engine(apply_migrations: str) -> AsyncIterator[AsyncEngine]:
+    engine = make_engine(apply_migrations)
     try:
         yield engine
     finally:
