@@ -495,6 +495,146 @@ async def test_fetch_one_broken_to_active_on_success(
 
 
 @pytest.mark.asyncio
+async def test_fetch_one_broken_to_dead_after_duration_since_last_success(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A broken feed whose ``last_successful_fetch_at`` is older than
+    ``dead_duration_days`` transitions to ``dead`` on the next failure."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/long-broken"
+
+    now = datetime(2026, 4, 15, 12, 0, 0, tzinfo=UTC)
+    last_success = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)  # 8 days ago
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            status="broken",
+            consecutive_failures=20,
+            last_error_code="http_5xx",
+            last_successful_fetch_at=last_success,
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    respx_mock.get(feed_url).mock(return_value=Response(500))
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+            dead_duration_days=7,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "dead"
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_broken_to_dead_falls_back_to_created_at(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """If a feed has never had a successful fetch, the dead clock
+    counts from ``created_at`` instead of ``last_successful_fetch_at``."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/never-succeeded"
+
+    now = datetime(2026, 4, 15, 12, 0, 0, tzinfo=UTC)
+    created = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)  # 8 days ago
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            status="broken",
+            consecutive_failures=20,
+            last_error_code="connection",
+            last_successful_fetch_at=None,
+            created_at=created,
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    respx_mock.get(feed_url).mock(return_value=Response(500))
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+            dead_duration_days=7,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "dead"
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_broken_stays_broken_within_duration(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A broken feed that is still within the dead_duration window
+    must stay ``broken`` — no premature dead transition."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/recent-broken"
+
+    now = datetime(2026, 4, 15, 12, 0, 0, tzinfo=UTC)
+    last_success = datetime(2026, 4, 13, 12, 0, 0, tzinfo=UTC)  # 2 days ago
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            status="broken",
+            consecutive_failures=5,
+            last_error_code="http_5xx",
+            last_successful_fetch_at=last_success,
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    respx_mock.get(feed_url).mock(return_value=Response(500))
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+            dead_duration_days=7,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "broken"
+    assert state["consecutive_failures"] == 6
+
+
+@pytest.mark.asyncio
 async def test_fetch_one_http_410_transitions_to_dead_immediately(
     fetch_app: FastAPI,
     respx_mock: respx.Router,

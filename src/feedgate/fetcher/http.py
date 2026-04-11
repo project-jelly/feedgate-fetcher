@@ -55,6 +55,7 @@ class ResponseTooLargeError(Exception):
 DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
 DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
 DEFAULT_BROKEN_THRESHOLD: int = 3
+DEFAULT_DEAD_DURATION_DAYS: int = 7
 
 
 def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
@@ -130,6 +131,7 @@ async def fetch_one(
     max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
     max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
     broken_threshold: int = DEFAULT_BROKEN_THRESHOLD,
+    dead_duration_days: int = DEFAULT_DEAD_DURATION_DAYS,
 ) -> None:
     next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
@@ -199,10 +201,27 @@ async def fetch_one(
             if feed.status != "dead":
                 _log_transition(feed, "dead", reason="http_410")
                 feed.status = "dead"
-        elif feed.status == "active" and feed.consecutive_failures >= broken_threshold:
-            _log_transition(
-                feed,
-                "broken",
-                reason=f"consecutive_failures>={broken_threshold}",
-            )
-            feed.status = "broken"
+        else:
+            # active -> broken on threshold
+            if feed.status == "active" and feed.consecutive_failures >= broken_threshold:
+                _log_transition(
+                    feed,
+                    "broken",
+                    reason=f"consecutive_failures>={broken_threshold}",
+                )
+                feed.status = "broken"
+            # broken -> dead on time since last success (fall-through
+            # allowed: if active just flipped to broken above AND the
+            # feed already has no success for dead_duration_days, we
+            # transition straight through to dead in the same call)
+            if feed.status == "broken":
+                reference = feed.last_successful_fetch_at or feed.created_at
+                if reference is not None and (
+                    now - reference >= timedelta(days=dead_duration_days)
+                ):
+                    _log_transition(
+                        feed,
+                        "dead",
+                        reason=f"no_success_for_>={dead_duration_days}d",
+                    )
+                    feed.status = "dead"
