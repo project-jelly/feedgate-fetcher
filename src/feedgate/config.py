@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     fetch_max_entries_initial: int = 50
     scheduler_enabled: bool = True
 
+    # Retention policy (ADR 004, docs/spec/entry.md).
+    # Entries are kept if they fall in EITHER the time window
+    # (fetched_at >= now - retention_days) OR the per-feed top-N
+    # window (most recent retention_min_per_feed by fetched_at DESC).
+    # The sweeper runs every retention_sweep_interval_seconds.
+    retention_days: int = 90
+    retention_min_per_feed: int = 20
+    retention_sweep_interval_seconds: int = 3600
+    retention_enabled: bool = True
+
 
 def get_settings() -> Settings:
     return Settings()
