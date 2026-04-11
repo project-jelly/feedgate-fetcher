@@ -54,6 +54,24 @@ class ResponseTooLargeError(Exception):
 
 DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
 DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
+DEFAULT_BROKEN_THRESHOLD: int = 3
+
+
+def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
+    """Emit a WARNING-level log entry for a feed lifecycle transition.
+
+    INFO is currently swallowed by the default stdlib root logger
+    configuration, so lifecycle moves go out at WARNING level to
+    ensure operator visibility (see spec/feed.md "관찰 가능성").
+    """
+    logger.warning(
+        "feed_id=%s url=%s state=%s->%s reason=%s",
+        feed.id,
+        feed.effective_url,
+        feed.status,
+        new_status,
+        reason,
+    )
 
 
 # Content types that unambiguously indicate "this is not a feed".
@@ -111,6 +129,7 @@ async def fetch_one(
     user_agent: str,
     max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
     max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
+    broken_threshold: int = DEFAULT_BROKEN_THRESHOLD,
 ) -> None:
     next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
@@ -160,6 +179,9 @@ async def fetch_one(
         feed.last_successful_fetch_at = now
         feed.last_error_code = None
         feed.consecutive_failures = 0
+        if feed.status != "active":
+            _log_transition(feed, "active", reason="fetch_succeeded")
+            feed.status = "active"
     except Exception as exc:
         code = _classify_error(exc)
         feed.last_error_code = code
@@ -171,3 +193,16 @@ async def fetch_one(
             code,
             exc,
         )
+
+        # Lifecycle transitions (spec/feed.md — circuit breaker + 410)
+        if code == "http_410":
+            if feed.status != "dead":
+                _log_transition(feed, "dead", reason="http_410")
+                feed.status = "dead"
+        elif feed.status == "active" and feed.consecutive_failures >= broken_threshold:
+            _log_transition(
+                feed,
+                "broken",
+                reason=f"consecutive_failures>={broken_threshold}",
+            )
+            feed.status = "broken"

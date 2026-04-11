@@ -401,6 +401,133 @@ async def test_fetch_one_rejects_oversized_response_as_too_large(
 
 
 @pytest.mark.asyncio
+async def test_fetch_one_active_to_broken_after_n_failures(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """After ``broken_threshold`` consecutive failures, an active feed
+    transitions to ``broken``. Failures below the threshold leave the
+    status unchanged."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/flaky-to-broken"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(return_value=Response(500))
+
+    async def _one_call(i: int) -> None:
+        async with sf() as session:
+            feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+            await fetch_one(
+                session,
+                fetch_app.state.http_client,
+                feed,
+                now=datetime(2026, 4, 11, 0, i, 0, tzinfo=UTC),
+                interval_seconds=60,
+                user_agent="test-agent",
+                broken_threshold=3,
+            )
+            await session.commit()
+
+    for i in (1, 2):
+        await _one_call(i)
+        state = await _load_feed(sf, feed_id)
+        assert state["status"] == "active", f"call {i}: {state}"
+        assert state["consecutive_failures"] == i
+
+    await _one_call(3)
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "broken"
+    assert state["consecutive_failures"] == 3
+
+    await _one_call(4)
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "broken"
+    assert state["consecutive_failures"] == 4
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_broken_to_active_on_success(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A successful fetch on a broken feed flips it back to active and
+    resets consecutive_failures to 0."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/recovered"
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            status="broken",
+            consecutive_failures=7,
+            last_error_code="http_5xx",
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "active"
+    assert state["consecutive_failures"] == 0
+    assert state["last_error_code"] is None
+    assert state["last_successful_fetch_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_http_410_transitions_to_dead_immediately(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """HTTP 410 Gone is the only explicit permanent HTTP signal. It
+    transitions the feed to ``dead`` on the first occurrence, even if
+    consecutive_failures is still below the broken threshold."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/gone"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(return_value=Response(410))
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "dead"
+    assert state["last_error_code"] == "http_410"
+    assert state["consecutive_failures"] == 1
+
+
+@pytest.mark.asyncio
 async def test_fetch_one_accepts_blank_content_type(
     fetch_app: FastAPI,
     respx_mock: respx.Router,

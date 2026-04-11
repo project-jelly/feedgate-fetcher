@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     retention_sweep_interval_seconds: int = 3600
     retention_enabled: bool = True
 
+    # Feed lifecycle state machine (docs/spec/feed.md).
+    # active -> broken after `broken_threshold` consecutive failures.
+    # broken -> dead when (now - last_successful_fetch_at) exceeds
+    # `dead_duration_days`, using `created_at` as fallback when no
+    # success has ever been recorded. http_410 is an immediate dead
+    # transition from any state.
+    broken_threshold: int = 3
+    dead_duration_days: int = 7
+
 
 def get_settings() -> Settings:
     return Settings()

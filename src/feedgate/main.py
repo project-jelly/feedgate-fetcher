@@ -94,6 +94,8 @@ def create_app() -> FastAPI:
     app.state.retention_days = settings.retention_days
     app.state.retention_min_per_feed = settings.retention_min_per_feed
     app.state.retention_sweep_interval_seconds = settings.retention_sweep_interval_seconds
+    app.state.broken_threshold = settings.broken_threshold
+    app.state.dead_duration_days = settings.dead_duration_days
     register_routers(app)
     return app
 
