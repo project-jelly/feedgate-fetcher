@@ -34,8 +34,6 @@ from feedgate.models import Feed
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONCURRENCY = 4
-
 
 async def _process_feed(
     feed_id: int,
@@ -48,12 +46,12 @@ async def _process_feed(
     http_client = app.state.http_client
     interval = app.state.fetch_interval_seconds
     ua = app.state.fetch_user_agent
-    max_bytes = getattr(app.state, "fetch_max_bytes", 5 * 1024 * 1024)
-    max_entries_initial = getattr(app.state, "fetch_max_entries_initial", 50)
-    broken_threshold = getattr(app.state, "broken_threshold", 3)
-    dead_duration_days = getattr(app.state, "dead_duration_days", 7)
-    broken_max_backoff_seconds = getattr(app.state, "broken_max_backoff_seconds", 3600)
-    backoff_jitter_ratio = getattr(app.state, "backoff_jitter_ratio", 0.25)
+    max_bytes = app.state.fetch_max_bytes
+    max_entries_initial = app.state.fetch_max_entries_initial
+    broken_threshold = app.state.broken_threshold
+    dead_duration_days = app.state.dead_duration_days
+    broken_max_backoff_seconds = app.state.broken_max_backoff_seconds
+    backoff_jitter_ratio = app.state.backoff_jitter_ratio
 
     async with sem, sf() as session:
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
@@ -96,8 +94,7 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
          is the only way they can get re-fetched.
     """
     now = now or datetime.now(UTC)
-    dead_probe_interval_days = getattr(app.state, "dead_probe_interval_days", 7)
-    probe_cutoff = now - timedelta(days=dead_probe_interval_days)
+    probe_cutoff = now - timedelta(days=app.state.dead_probe_interval_days)
 
     sf = app.state.session_factory
     async with sf() as session:
@@ -124,8 +121,7 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
     if not feed_ids:
         return
 
-    concurrency = getattr(app.state, "fetch_concurrency", DEFAULT_CONCURRENCY)
-    sem = asyncio.Semaphore(concurrency)
+    sem = asyncio.Semaphore(app.state.fetch_concurrency)
     await asyncio.gather(*(_process_feed(fid, app, sem, now) for fid in feed_ids))
 
 

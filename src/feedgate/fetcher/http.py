@@ -53,14 +53,6 @@ class ResponseTooLargeError(Exception):
     the full oversized body into memory."""
 
 
-DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
-DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
-DEFAULT_BROKEN_THRESHOLD: int = 3
-DEFAULT_DEAD_DURATION_DAYS: int = 7
-DEFAULT_BROKEN_MAX_BACKOFF_SECONDS: int = 3600
-DEFAULT_BACKOFF_JITTER_RATIO: float = 0.25
-
-
 def _compute_next_fetch_at(
     feed: Feed,
     *,
@@ -185,12 +177,12 @@ async def fetch_one(
     now: datetime,
     interval_seconds: int,
     user_agent: str,
-    max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
-    max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
-    broken_threshold: int = DEFAULT_BROKEN_THRESHOLD,
-    dead_duration_days: int = DEFAULT_DEAD_DURATION_DAYS,
-    broken_max_backoff_seconds: int = DEFAULT_BROKEN_MAX_BACKOFF_SECONDS,
-    backoff_jitter_ratio: float = DEFAULT_BACKOFF_JITTER_RATIO,
+    max_bytes: int,
+    max_entries_initial: int,
+    broken_threshold: int,
+    dead_duration_days: int,
+    broken_max_backoff_seconds: int,
+    backoff_jitter_ratio: float,
 ) -> None:
     feed.last_attempt_at = now
 

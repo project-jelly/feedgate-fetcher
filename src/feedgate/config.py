@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     fetch_max_bytes: int = 5 * 1024 * 1024
     fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
+    fetch_concurrency: int = 4
     scheduler_enabled: bool = True
 
     # Retention policy (ADR 004, docs/spec/entry.md).
