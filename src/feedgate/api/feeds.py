@@ -8,9 +8,11 @@ used; see ADR 002).
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +21,11 @@ from feedgate.models import Feed
 from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate.urlnorm import normalize_url
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
+
+VALID_STATUSES: frozenset[str] = frozenset({"active", "broken", "dead"})
 
 
 @router.post(
@@ -51,9 +57,25 @@ async def create_feed(
 async def list_feeds(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: int = 50,
+    status_filter: Annotated[
+        str | None,
+        Query(
+            alias="status",
+            description="Filter by lifecycle state (active | broken | dead)",
+        ),
+    ] = None,
 ) -> PaginatedFeeds:
     limit = max(1, min(limit, 200))
-    result = await session.execute(select(Feed).order_by(Feed.id.asc()).limit(limit))
+    stmt = select(Feed)
+    if status_filter is not None:
+        if status_filter not in VALID_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"status must be one of {sorted(VALID_STATUSES)}",
+            )
+        stmt = stmt.where(Feed.status == status_filter)
+    stmt = stmt.order_by(Feed.id.asc()).limit(limit)
+    result = await session.execute(stmt)
     feeds = result.scalars().all()
     return PaginatedFeeds(
         items=[FeedResponse.model_validate(f) for f in feeds],
@@ -81,3 +103,47 @@ async def delete_feed(
     if feed is not None:
         await session.delete(feed)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{feed_id}/reactivate", response_model=FeedResponse)
+async def reactivate_feed(
+    feed_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Feed:
+    """Manually flip any feed back to ``active`` (spec/feed.md).
+
+    The primary use case is moving a ``dead`` feed back into the
+    fetch rotation after an operator has confirmed the upstream is
+    healthy again. Also works on a ``broken`` feed to skip the
+    exponential backoff and force an immediate next tick.
+
+    Semantics:
+      * ``status`` -> ``'active'``
+      * ``consecutive_failures`` -> ``0``
+      * ``last_error_code`` -> ``None``
+      * ``next_fetch_at`` -> ``now`` (picked up by the very next tick)
+      * ``last_successful_fetch_at`` stays unchanged (we have not
+        actually succeeded yet — a subsequent successful fetch will
+        update it)
+    """
+    feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
+    if feed is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="feed not found")
+
+    if feed.status != "active":
+        logger.warning(
+            "feed_id=%s url=%s state=%s->%s reason=%s",
+            feed.id,
+            feed.effective_url,
+            feed.status,
+            "active",
+            "manual_reactivate",
+        )
+
+    feed.status = "active"
+    feed.consecutive_failures = 0
+    feed.last_error_code = None
+    feed.next_fetch_at = datetime.now(UTC)
+    await session.flush()
+    await session.refresh(feed)
+    return feed

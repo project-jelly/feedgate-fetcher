@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from feedgate.models import Feed
 
 
 @pytest.mark.asyncio
@@ -112,3 +116,117 @@ async def test_delete_missing_feed_is_idempotent(
     # The plan leaves the exact code for missing IDs to spec; we
     # implement "idempotent delete" → 204.
     assert resp.status_code == 204
+
+
+# ---- status filter + manual reactivation -----------------------------------
+
+
+async def _seed_feed(
+    sf: async_sessionmaker[AsyncSession],
+    *,
+    url: str,
+    status: str,
+    consecutive_failures: int = 0,
+    last_error_code: str | None = None,
+) -> int:
+    async with sf() as session:
+        feed = Feed(
+            url=url,
+            effective_url=url,
+            status=status,
+            consecutive_failures=consecutive_failures,
+            last_error_code=last_error_code,
+        )
+        session.add(feed)
+        await session.commit()
+        return feed.id
+
+
+@pytest.mark.asyncio
+async def test_list_feeds_status_filter_returns_only_matching(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_feed(async_session_factory, url="http://f.test/a", status="active")
+    await _seed_feed(async_session_factory, url="http://f.test/b", status="broken")
+    await _seed_feed(async_session_factory, url="http://f.test/c", status="dead")
+    await _seed_feed(async_session_factory, url="http://f.test/d", status="active")
+
+    resp = await api_client.get("/v1/feeds", params={"status": "dead"})
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["url"] == "http://f.test/c"
+    assert items[0]["status"] == "dead"
+
+    resp = await api_client.get("/v1/feeds", params={"status": "active"})
+    urls = {item["url"] for item in resp.json()["items"]}
+    assert urls == {"http://f.test/a", "http://f.test/d"}
+
+
+@pytest.mark.asyncio
+async def test_list_feeds_invalid_status_returns_400(
+    api_client: AsyncClient,
+) -> None:
+    resp = await api_client.get("/v1/feeds", params={"status": "zombie"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_reactivate_dead_feed_flips_to_active_and_resets_counters(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    feed_id = await _seed_feed(
+        async_session_factory,
+        url="http://f.test/dead-revive",
+        status="dead",
+        consecutive_failures=42,
+        last_error_code="http_4xx",
+    )
+
+    resp = await api_client.post(f"/v1/feeds/{feed_id}/reactivate")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == feed_id
+    assert body["status"] == "active"
+    assert body["last_error_code"] is None
+
+    async with async_session_factory() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+    assert feed.status == "active"
+    assert feed.consecutive_failures == 0
+    assert feed.last_error_code is None
+
+
+@pytest.mark.asyncio
+async def test_reactivate_broken_feed_also_works(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Manual reactivation is useful for broken feeds too — it
+    short-circuits the exponential backoff."""
+    feed_id = await _seed_feed(
+        async_session_factory,
+        url="http://f.test/broken-revive",
+        status="broken",
+        consecutive_failures=8,
+        last_error_code="http_5xx",
+    )
+
+    resp = await api_client.post(f"/v1/feeds/{feed_id}/reactivate")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "active"
+    # consecutive_failures is internal (ADR 003, not in FeedResponse),
+    # so verify via direct DB read.
+    async with async_session_factory() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+    assert feed.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_reactivate_missing_feed_returns_404(
+    api_client: AsyncClient,
+) -> None:
+    resp = await api_client.post("/v1/feeds/999999/reactivate")
+    assert resp.status_code == 404
