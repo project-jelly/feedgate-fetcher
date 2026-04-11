@@ -75,6 +75,7 @@ def create_app() -> FastAPI:
     app.state.http_client = http_client
     app.state.fetch_interval_seconds = settings.fetch_interval_seconds
     app.state.fetch_user_agent = settings.fetch_user_agent
+    app.state.fetch_max_bytes = settings.fetch_max_bytes
     app.state.fetch_concurrency = DEFAULT_CONCURRENCY
     register_routers(app)
     return app

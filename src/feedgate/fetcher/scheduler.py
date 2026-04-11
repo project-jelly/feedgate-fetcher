@@ -48,6 +48,7 @@ async def _process_feed(
     http_client = app.state.http_client
     interval = app.state.fetch_interval_seconds
     ua = app.state.fetch_user_agent
+    max_bytes = getattr(app.state, "fetch_max_bytes", 5 * 1024 * 1024)
 
     async with sem, sf() as session:
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
@@ -61,6 +62,7 @@ async def _process_feed(
                 now=now,
                 interval_seconds=interval,
                 user_agent=ua,
+                max_bytes=max_bytes,
             )
             await session.commit()
         except Exception:

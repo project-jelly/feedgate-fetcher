@@ -255,6 +255,48 @@ async def test_fetch_one_rejects_html_content_type_as_not_a_feed(
 
 
 @pytest.mark.asyncio
+async def test_fetch_one_rejects_oversized_response_as_too_large(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A response body larger than ``max_bytes`` must be rejected as
+    ``too_large`` with no entries persisted and no successful-fetch
+    timer advance."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/huge-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    # 4 KB payload, cap set to 1 KB below.
+    oversized = b"<feed>" + (b"x" * 4096) + b"</feed>"
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=oversized,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_bytes=1024,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == "too_large"
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 1
+    assert await _count_entries_for_feed(sf, feed_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_fetch_one_accepts_blank_content_type(
     fetch_app: FastAPI,
     respx_mock: respx.Router,

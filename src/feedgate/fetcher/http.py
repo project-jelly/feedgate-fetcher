@@ -45,6 +45,15 @@ class NotAFeedError(Exception):
     clearly not an RSS/Atom/XML feed (html, json, plain text)."""
 
 
+class ResponseTooLargeError(Exception):
+    """Raised when the streamed response body exceeds the configured
+    size cap (``FETCH_MAX_BYTES``). Raised mid-stream so we never load
+    the full oversized body into memory."""
+
+
+DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
+
+
 # Content types that unambiguously indicate "this is not a feed".
 # We intentionally do NOT maintain an allow-list because many feeds
 # serve odd values like ``application/octet-stream`` (Python Insider)
@@ -72,6 +81,8 @@ def _classify_error(exc: BaseException) -> str:
     """Map a fetch exception to a short error code."""
     if isinstance(exc, NotAFeedError):
         return "not_a_feed"
+    if isinstance(exc, ResponseTooLargeError):
+        return "too_large"
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.ConnectError):
@@ -96,24 +107,33 @@ async def fetch_one(
     now: datetime,
     interval_seconds: int,
     user_agent: str,
+    max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
 ) -> None:
     next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
     feed.next_fetch_at = next_at
 
     try:
-        response = await http_client.get(
+        async with http_client.stream(
+            "GET",
             feed.effective_url,
             headers={"User-Agent": user_agent},
             follow_redirects=True,
-        )
-        response.raise_for_status()
+        ) as response:
+            response.raise_for_status()
 
-        ct = response.headers.get("content-type")
-        if _is_not_a_feed_content_type(ct):
-            raise NotAFeedError(f"unexpected content-type: {ct}")
+            ct = response.headers.get("content-type")
+            if _is_not_a_feed_content_type(ct):
+                raise NotAFeedError(f"unexpected content-type: {ct}")
 
-        body = response.content
+            body_parts: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                body_parts.append(chunk)
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ResponseTooLargeError(f"body exceeded {max_bytes} bytes")
+            body = b"".join(body_parts)
 
         parsed = await parse_feed(body)
         if parsed.entries:
