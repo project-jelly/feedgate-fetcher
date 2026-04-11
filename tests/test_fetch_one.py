@@ -16,8 +16,24 @@ from httpx import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from feedgate.config import Settings
 from feedgate.fetcher.http import _compute_next_fetch_at, fetch_one
 from feedgate.models import Entry, Feed
+
+_TEST_SETTINGS = Settings()
+_FETCH_DEFAULTS: dict[str, Any] = {
+    "max_bytes": _TEST_SETTINGS.fetch_max_bytes,
+    "max_entries_initial": _TEST_SETTINGS.fetch_max_entries_initial,
+    "broken_threshold": _TEST_SETTINGS.broken_threshold,
+    "dead_duration_days": _TEST_SETTINGS.dead_duration_days,
+    "broken_max_backoff_seconds": _TEST_SETTINGS.broken_max_backoff_seconds,
+    "backoff_jitter_ratio": _TEST_SETTINGS.backoff_jitter_ratio,
+}
+
+
+def _kwargs(**overrides: Any) -> dict[str, Any]:
+    return {**_FETCH_DEFAULTS, **overrides}
+
 
 ATOM_BODY = b"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -115,6 +131,7 @@ async def test_fetch_one_success_stores_entries_and_updates_timers(
             now=now,
             interval_seconds=interval,
             user_agent="test-agent",
+            **_FETCH_DEFAULTS,
         )
         await session.commit()
 
@@ -152,6 +169,7 @@ async def test_fetch_one_http_404_records_error_without_raising(
             now=now,
             interval_seconds=60,
             user_agent="test-agent",
+            **_FETCH_DEFAULTS,
         )
         await session.commit()
 
@@ -184,6 +202,7 @@ async def test_fetch_one_second_success_resets_failure_counter(
             now=datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
+            **_FETCH_DEFAULTS,
         )
         await session.commit()
 
@@ -206,6 +225,7 @@ async def test_fetch_one_second_success_resets_failure_counter(
             now=datetime(2026, 4, 10, 13, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
+            **_FETCH_DEFAULTS,
         )
         await session.commit()
 
@@ -245,6 +265,7 @@ async def test_fetch_one_rejects_html_content_type_as_not_a_feed(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
+            **_FETCH_DEFAULTS,
         )
         await session.commit()
 
@@ -298,7 +319,7 @@ async def test_fetch_one_caps_initial_fetch_entries(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
-            max_entries_initial=3,
+            **_kwargs(max_entries_initial=3),
         )
         await session.commit()
 
@@ -334,7 +355,7 @@ async def test_fetch_one_no_cap_on_subsequent_fetch(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
-            max_entries_initial=3,
+            **_kwargs(max_entries_initial=3),
         )
         await session.commit()
 
@@ -352,7 +373,7 @@ async def test_fetch_one_no_cap_on_subsequent_fetch(
             now=datetime(2026, 4, 11, 1, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
-            max_entries_initial=3,
+            **_kwargs(max_entries_initial=3),
         )
         await session.commit()
 
@@ -390,7 +411,7 @@ async def test_fetch_one_rejects_oversized_response_as_too_large(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
-            max_bytes=1024,
+            **_kwargs(max_bytes=1024),
         )
         await session.commit()
 
@@ -425,7 +446,7 @@ async def test_fetch_one_active_to_broken_after_n_failures(
                 now=datetime(2026, 4, 11, 0, i, 0, tzinfo=UTC),
                 interval_seconds=60,
                 user_agent="test-agent",
-                broken_threshold=3,
+                **_kwargs(broken_threshold=3),
             )
             await session.commit()
 
@@ -484,7 +505,7 @@ async def test_fetch_one_broken_to_active_on_success(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
+            **_kwargs(broken_threshold=3),
         )
         await session.commit()
 
@@ -532,8 +553,7 @@ async def test_fetch_one_broken_to_dead_after_duration_since_last_success(
             now=now,
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
-            dead_duration_days=7,
+            **_kwargs(broken_threshold=3, dead_duration_days=7),
         )
         await session.commit()
 
@@ -579,8 +599,7 @@ async def test_fetch_one_broken_to_dead_falls_back_to_created_at(
             now=now,
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
-            dead_duration_days=7,
+            **_kwargs(broken_threshold=3, dead_duration_days=7),
         )
         await session.commit()
 
@@ -625,8 +644,7 @@ async def test_fetch_one_broken_stays_broken_within_duration(
             now=now,
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
-            dead_duration_days=7,
+            **_kwargs(broken_threshold=3, dead_duration_days=7),
         )
         await session.commit()
 
@@ -658,7 +676,7 @@ async def test_fetch_one_http_410_transitions_to_dead_immediately(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
+            **_kwargs(broken_threshold=3),
         )
         await session.commit()
 
@@ -692,6 +710,7 @@ async def test_fetch_one_accepts_blank_content_type(
             now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
             interval_seconds=60,
             user_agent="test-agent",
+            **_FETCH_DEFAULTS,
         )
         await session.commit()
 
@@ -737,7 +756,7 @@ async def test_fetch_one_429_is_not_a_circuit_breaker_failure(
                 now=datetime(2026, 4, 11, 0, i, 0, tzinfo=UTC),
                 interval_seconds=60,
                 user_agent="test-agent",
-                broken_threshold=3,
+                **_kwargs(broken_threshold=3),
             )
             await session.commit()
 
@@ -771,7 +790,7 @@ async def test_fetch_one_429_honors_retry_after_header(
             now=now,
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
+            **_kwargs(broken_threshold=3),
         )
         await session.commit()
 
@@ -806,7 +825,7 @@ async def test_fetch_one_429_floors_retry_after_at_base_interval(
             now=now,
             interval_seconds=60,
             user_agent="test-agent",
-            broken_threshold=3,
+            **_kwargs(broken_threshold=3),
         )
         await session.commit()
 

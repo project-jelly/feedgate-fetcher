@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
 from testcontainers.postgres import PostgresContainer
 
 from feedgate.api import register_routers
+from feedgate.config import Settings
 from feedgate.db import make_engine, make_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -150,12 +151,20 @@ async def fetch_app(
     real HTTP happens. The scheduler itself is NOT started; tests call
     ``tick_once`` directly.
     """
+    settings = Settings()
     app = FastAPI()
     app.state.session_factory = async_session_factory
     app.state.http_client = AsyncClient()
     app.state.fetch_interval_seconds = 60
     app.state.fetch_user_agent = "feedgate-fetcher/test"
-    app.state.fetch_concurrency = 4
+    app.state.fetch_concurrency = settings.fetch_concurrency
+    app.state.fetch_max_bytes = settings.fetch_max_bytes
+    app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
+    app.state.broken_threshold = settings.broken_threshold
+    app.state.dead_duration_days = settings.dead_duration_days
+    app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
+    app.state.backoff_jitter_ratio = settings.backoff_jitter_ratio
+    app.state.dead_probe_interval_days = settings.dead_probe_interval_days
     try:
         yield app
     finally:
