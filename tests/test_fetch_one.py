@@ -212,3 +212,76 @@ async def test_fetch_one_second_success_resets_failure_counter(
     assert state2["consecutive_failures"] == 0
     assert state2["last_error_code"] is None
     assert state2["last_successful_fetch_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_rejects_html_content_type_as_not_a_feed(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """200 OK + ``text/html`` body must be recorded as ``not_a_feed``
+    and must not insert any entries, even if the body looks parseable.
+    """
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/html-cloaking-as-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    # A Cloudflare WAF page or a 200 OK HTML error page — not a feed.
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=b"<html><body>Attention Required</body></html>",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == "not_a_feed"
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 1
+    assert await _count_entries_for_feed(sf, feed_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_accepts_blank_content_type(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """No Content-Type header + valid XML must still succeed — many
+    real-world feeds ship empty or unusual Content-Type values."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/blank-ct-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(200, content=ATOM_BODY),
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] is None
+    assert state["last_successful_fetch_at"] is not None
+    assert await _count_entries_for_feed(sf, feed_id) == 2

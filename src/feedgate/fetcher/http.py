@@ -40,8 +40,38 @@ from feedgate.models import Feed
 logger = logging.getLogger(__name__)
 
 
+class NotAFeedError(Exception):
+    """Raised when a 200 OK response carries a Content-Type that is
+    clearly not an RSS/Atom/XML feed (html, json, plain text)."""
+
+
+# Content types that unambiguously indicate "this is not a feed".
+# We intentionally do NOT maintain an allow-list because many feeds
+# serve odd values like ``application/octet-stream`` (Python Insider)
+# or omit the header entirely; feedparser handles those just fine.
+NOT_A_FEED_CONTENT_TYPES: frozenset[str] = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+        "application/json",
+        "application/ld+json",
+        "text/plain",
+    }
+)
+
+
+def _is_not_a_feed_content_type(ct: str | None) -> bool:
+    """Return True if the Content-Type header is clearly not a feed."""
+    if not ct:
+        return False
+    base = ct.split(";", 1)[0].strip().lower()
+    return base in NOT_A_FEED_CONTENT_TYPES
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map a fetch exception to a short error code."""
+    if isinstance(exc, NotAFeedError):
+        return "not_a_feed"
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.ConnectError):
@@ -78,6 +108,11 @@ async def fetch_one(
             follow_redirects=True,
         )
         response.raise_for_status()
+
+        ct = response.headers.get("content-type")
+        if _is_not_a_feed_content_type(ct):
+            raise NotAFeedError(f"unexpected content-type: {ct}")
+
         body = response.content
 
         parsed = await parse_feed(body)
