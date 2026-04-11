@@ -17,7 +17,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from feedgate.config import Settings
-from feedgate.fetcher.http import _compute_next_fetch_at, fetch_one
+from feedgate.fetcher.http import (
+    _compute_next_fetch_at,
+    _parse_retry_after,
+    fetch_one,
+)
 from feedgate.models import Entry, Feed
 
 _TEST_SETTINGS = Settings()
@@ -833,6 +837,75 @@ async def test_fetch_one_429_floors_retry_after_at_base_interval(
     delta = (state["next_fetch_at"] - now).total_seconds()
     # Retry-After 10 < base_interval 60 → floor at 60
     assert delta == 60
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_429_honors_retry_after_http_date(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Cloudflare/GitHub emit Retry-After as an HTTP-date, not a
+    delta-seconds integer. fetch_one must convert the absolute date to
+    a relative delay against ``now`` and honor it (subject to the
+    base-interval floor)."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/retry-after-http-date"
+    feed_id = await _create_feed(sf, feed_url)
+
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    # 5 minutes in the future, RFC 7231 IMF-fixdate form
+    retry_date = "Sat, 11 Apr 2026 00:05:00 GMT"
+    respx_mock.get(feed_url).mock(return_value=Response(429, headers={"Retry-After": retry_date}))
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(broken_threshold=3),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    assert delta == 300
+    assert state["last_error_code"] == "rate_limited"
+
+
+def test_parse_retry_after_none_returns_none() -> None:
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    assert _parse_retry_after(None, now=now) is None
+
+
+def test_parse_retry_after_integer_seconds() -> None:
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    assert _parse_retry_after("120", now=now) == 120
+    # Whitespace allowed around the integer form.
+    assert _parse_retry_after("  60 ", now=now) == 60
+    # Negative integers clamp to zero.
+    assert _parse_retry_after("-10", now=now) == 0
+
+
+def test_parse_retry_after_http_date_future() -> None:
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    # IMF-fixdate, 2 minutes in the future
+    assert _parse_retry_after("Sat, 11 Apr 2026 00:02:00 GMT", now=now) == 120
+
+
+def test_parse_retry_after_http_date_past_clamps_to_zero() -> None:
+    now = datetime(2026, 4, 11, 0, 10, 0, tzinfo=UTC)
+    # Date is 10 minutes earlier than now — must clamp at 0, not go negative
+    assert _parse_retry_after("Sat, 11 Apr 2026 00:00:00 GMT", now=now) == 0
+
+
+def test_parse_retry_after_unparseable_returns_none() -> None:
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    assert _parse_retry_after("not-a-date", now=now) is None
+    assert _parse_retry_after("", now=now) is None
 
 
 def test_compute_next_fetch_at_active_feed_uses_exact_base_interval() -> None:

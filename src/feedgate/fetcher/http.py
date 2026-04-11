@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 
 import httpx
 from sqlalchemy import func, select
@@ -132,20 +133,39 @@ def _is_not_a_feed_content_type(ct: str | None) -> bool:
     return base in NOT_A_FEED_CONTENT_TYPES
 
 
-def _parse_retry_after(header: str | None) -> int | None:
-    """Parse the integer-seconds form of the ``Retry-After`` header.
+def _parse_retry_after(header: str | None, *, now: datetime) -> int | None:
+    """Parse ``Retry-After`` per RFC 7231 §7.1.3.
 
-    Retry-After can also be an HTTP-date, but we only support the
-    integer-seconds form for the walking skeleton; HTTP-date is
-    vanishingly rare for 429 responses in practice.
+    Accepts either the integer-seconds form (``"120"``) or the
+    HTTP-date form (``"Wed, 11 Apr 2026 07:30:00 GMT"``). Cloudflare,
+    GitHub, and other large origins emit the date form in production,
+    so supporting only seconds would silently drop the signal and
+    hammer the upstream at base interval instead of honoring the
+    requested delay.
+
+    Returns the delay in seconds relative to ``now``, clamped at zero
+    (a past date returns ``0``, not a negative number). Returns
+    ``None`` when the header is absent or unparseable in either form.
     """
     if header is None:
         return None
+    stripped = header.strip()
+    # Integer-seconds form.
     try:
-        value = int(header.strip())
+        return max(0, int(stripped))
+    except ValueError:
+        pass
+    # HTTP-date form (RFC 7231 §7.1.1.1). email.utils handles all three
+    # legal date formats — IMF-fixdate, RFC 850, asctime.
+    try:
+        parsed = parsedate_to_datetime(stripped)
     except (TypeError, ValueError):
         return None
-    return max(0, value)
+    # Dates without an explicit timezone are treated as UTC per RFC 7231.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    delta_seconds = (parsed - now).total_seconds()
+    return max(0, int(delta_seconds))
 
 
 def _classify_error(exc: BaseException) -> ErrorCode:
@@ -200,7 +220,7 @@ async def fetch_one(
             # out of fetch_one early. We do NOT update
             # last_successful_fetch_at because we didn't succeed.
             if response.status_code == 429:
-                retry_after = _parse_retry_after(response.headers.get("retry-after"))
+                retry_after = _parse_retry_after(response.headers.get("retry-after"), now=now)
                 wait_seconds = retry_after if retry_after is not None else 0
                 # Floor at base interval — don't hammer the upstream
                 # faster than our normal poll rate even if it says "10s".
