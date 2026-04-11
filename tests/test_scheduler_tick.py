@@ -6,6 +6,7 @@ and verifies every feed got fetched and its entries stored.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from feedgate.fetcher import scheduler
+from feedgate.fetcher.scheduler import _claim_due_feeds
 from feedgate.models import Entry, Feed
 
 
@@ -291,3 +293,121 @@ async def test_tick_once_skips_recently_probed_dead_feed(
     assert still_dead.status == "dead"
     assert still_dead.last_attempt_at == fresh_attempt  # untouched
     assert still_dead.last_error_code == "http_410"
+
+
+@pytest.mark.asyncio
+async def test_claim_due_feeds_skip_locked_prevents_double_claim(
+    fetch_app: FastAPI,
+) -> None:
+    """Two concurrent workers must never claim the same feed.
+
+    We stage a single due feed, then fire two overlapping claim
+    transactions. The first worker acquires ``FOR UPDATE`` on the
+    row; the second hits ``SKIP LOCKED`` and sees an empty set. This
+    is the core correctness test for the Postgres-as-queue model —
+    if it ever regresses, two worker replicas will double-fetch
+    every due feed on every tick.
+    """
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/skip-locked-race/feed"
+
+    async with sf() as session:
+        session.add(Feed(url=feed_url, effective_url=feed_url))
+        await session.commit()
+
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+
+    # Barrier: worker A acquires the row lock, THEN signals worker B
+    # to attempt its own claim. B runs while A's transaction is still
+    # open, so A's FOR UPDATE is in effect and B must SKIP LOCKED it.
+    a_has_locked = asyncio.Event()
+    b_is_done = asyncio.Event()
+
+    async def worker_a() -> list[int]:
+        async with sf() as session:
+            claimed = await _claim_due_feeds(
+                session,
+                now=now,
+                claim_batch_size=8,
+                claim_ttl_seconds=180,
+                dead_probe_interval_days=7,
+            )
+            # A now holds FOR UPDATE on the selected rows. Release
+            # control so worker B can run its query under the lock.
+            a_has_locked.set()
+            await b_is_done.wait()
+            await session.commit()
+            return claimed
+
+    async def worker_b() -> list[int]:
+        await a_has_locked.wait()
+        async with sf() as session:
+            claimed = await _claim_due_feeds(
+                session,
+                now=now,
+                claim_batch_size=8,
+                claim_ttl_seconds=180,
+                dead_probe_interval_days=7,
+            )
+            await session.commit()
+            b_is_done.set()
+            return claimed
+
+    a_result, b_result = await asyncio.gather(worker_a(), worker_b())
+
+    # Worker A claimed the feed; worker B's SKIP LOCKED made it
+    # invisible, so B returns an empty list. No double-claim.
+    assert len(a_result) == 1
+    assert b_result == []
+
+
+@pytest.mark.asyncio
+async def test_claim_due_feeds_advances_lease(
+    fetch_app: FastAPI,
+) -> None:
+    """After a successful claim, the feed's ``next_fetch_at`` is
+    advanced to ``now + claim_ttl_seconds`` and ``last_attempt_at``
+    is set to ``now``. A subsequent claim call in a new transaction
+    must now skip the feed because its gate timestamps are in the
+    future / freshly attempted. This is what prevents re-claim
+    across ticks, not just within one tick."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/lease-advance/feed"
+
+    async with sf() as session:
+        session.add(Feed(url=feed_url, effective_url=feed_url))
+        await session.commit()
+
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    claim_ttl = 180
+
+    async with sf() as session:
+        first = await _claim_due_feeds(
+            session,
+            now=now,
+            claim_batch_size=8,
+            claim_ttl_seconds=claim_ttl,
+            dead_probe_interval_days=7,
+        )
+        await session.commit()
+
+    assert len(first) == 1
+
+    async with sf() as session:
+        # Same `now` — the prior claim should have bumped both
+        # timestamps so the gate filters this feed out.
+        second = await _claim_due_feeds(
+            session,
+            now=now,
+            claim_batch_size=8,
+            claim_ttl_seconds=claim_ttl,
+            dead_probe_interval_days=7,
+        )
+        await session.commit()
+
+    assert second == []
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.url == feed_url))).scalar_one()
+    assert feed.next_fetch_at == now + timedelta(seconds=claim_ttl)
+    assert feed.last_attempt_at == now
