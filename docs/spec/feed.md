@@ -75,21 +75,134 @@ API는 이 값들을 노출하지 않는다.
 
 ### 전이 규칙
 
+모범 사례 패턴: **exponential backoff + circuit breaker**. Netflix
+Hystrix / AWS SDK retry / resilience4j와 동일한 철학.
+
 | 현재 | 트리거 | 다음 | 비고 |
 |---|---|---|---|
-| `active` | `consecutive_failures >= N` | `broken` | N = `BROKEN_THRESHOLD`, 기본 3 |
-| `active` | HTTP 410 수신 | `dead` | 즉시 전이 |
-| `broken` | 성공 (200 또는 304) | `active` | `consecutive_failures = 0` |
-| `broken` | `consecutive_failures >= M` | `dead` | M = `DEAD_THRESHOLD`, 기본 30 |
-| `broken` | HTTP 410 수신 | `dead` | 즉시 전이 |
-| `dead` | (자동 전이 없음) | `dead` | 수동 API로만 active 복귀 |
+| `active` | `consecutive_failures >= BROKEN_THRESHOLD` | `broken` | 기본 3회 |
+| `active` 또는 `broken` | HTTP 410 Gone 수신 | `dead` | 즉시 전이 (유일한 영구 HTTP 신호) |
+| `broken` | fetch 성공 (200/304) | `active` | counters 리셋 |
+| `broken` | **마지막 성공 이후 경과 시간 ≥ `DEAD_DURATION`** | `dead` | **시간 기반**, 기본 7일 |
+| `dead` | 주간 자동 probe 성공 | `active` | counters 리셋 |
+| `dead` | `POST /v1/feeds/{id}/reactivate` | `active` | 수동 재활성화 |
+
+#### 왜 dead 전이가 시간 기반인가 (count가 아니라)
+
+Count 기반(`consecutive_failures >= M`)은 `fetch_interval_seconds`에
+취약하다. interval이 3초일 때 30회 실패는 90초, 60초일 때는 30분,
+600초일 때는 5시간 — 의미가 전혀 달라진다. 반면 **"마지막 성공 이후
+경과 시간"은 interval 설정과 무관**하게 일관된 의미를 갖는다.
+
+7일 기준을 고른 이유:
+- 주말(금~일) + 월요일 infra outage를 전부 흡수
+- 대부분 일시 장애는 72시간 이내 복구
+- Feedly 같은 상용 리더기도 주(week) 단위로 dead 판정
+
+"마지막 성공 시간"이 없는 피드 (첫 성공 전에 broken된 경우)는
+`created_at`을 fallback으로 사용한다. 즉 등록 후 7일간 한 번도 성공
+못 했으면 dead.
+
+### Broken 상태 exponential backoff
+
+Broken 상태 피드는 다음 공식으로 `next_fetch_at`을 계산한다:
+
+```
+excess = max(0, consecutive_failures - BROKEN_THRESHOLD)
+backoff_factor = 2 ** excess              # 1, 2, 4, 8, 16, ...
+raw_interval = base_interval * backoff_factor
+capped = min(raw_interval, BROKEN_MAX_BACKOFF_SECONDS)
+jitter = random_uniform(-BACKOFF_JITTER_RATIO, +BACKOFF_JITTER_RATIO) * capped
+next_fetch_at = now + timedelta(seconds = capped + jitter)
+```
+
+예시 타임라인 (base_interval=60s, cap=3600s, jitter=±25%):
+
+| consecutive_failures | backoff | 다음 시도까지 |
+|---|---|---|
+| 1 (active) | 60s | ~60s |
+| 2 (active) | 60s | ~60s |
+| 3 (→ broken 전이) | 60s | ~60s |
+| 4 | 120s | 90~150s |
+| 5 | 240s | 180~300s |
+| 6 | 480s | 360~600s |
+| 7 | 960s | 720~1200s |
+| 8 | 1920s | 1440~2400s |
+| 9 | 3840s → **3600s (cap)** | 2700~4500s |
+| 10+ | 3600s (cap) | 2700~4500s |
+
+**왜 지터가 필요한가**: 다수 피드가 동시에 broken에 들어갔을 때 (공통
+upstream 장애) 회복 시점도 동시에 몰려 *thundering herd*가 발생한다.
+±25% 지터로 회복 요청을 시간축에 분산.
+
+7일간 동일 호스트로 약 168회 재시도 → 7일 경과 시 dead 전이.
+
+### 429 Rate Limited 특수 처리
+
+429 응답은 **circuit breaker 관점에서 "실패가 아니다"**. "천천히 해"와
+"고장났다"는 완전히 다른 신호이므로 섞으면 일시 과부하 서버가 false
+positive로 dead 전이된다.
+
+규칙:
+
+| 필드 | 429 수신 시 동작 |
+|---|---|
+| `consecutive_failures` | **증가 안 함** |
+| `status` | 전이 **없음** |
+| `last_successful_fetch_at` | 변경 없음 (실패가 아님) |
+| `last_error_code` | `"rate_limited"` 기록 |
+| `last_attempt_at` | 갱신 |
+| `next_fetch_at` | `Retry-After` 헤더 존중: `now + max(retry_after_seconds, base_interval)`. 헤더가 없거나 파싱 실패 시 `base_interval` 사용 |
+
+RFC 6585 + AWS / GCP / Cloudflare SDK가 모두 동일한 패턴을 쓴다.
+
+### Dead 재활성화: 자동 주간 probe + 수동 API
+
+**자동 주간 probe**: scheduler의 `tick_once` 쿼리는 기본적으로 dead
+피드를 제외하지만, **`last_attempt_at < now - DEAD_PROBE_INTERVAL`**인
+dead 피드는 예외적으로 포함한다. Dead 피드는 주 1회 fetch 시도를 받고:
+
+- 성공 → `active`로 복귀, counters 리셋
+- 실패 → 그대로 `dead` 유지, `last_attempt_at`만 갱신 (counters는 이미
+  상한 이상이므로 증가 안 함)
+
+이 방식으로 영구 사라진 것으로 판정됐지만 실제로는 일시적이었던 피드가
+자연 회복될 수 있다.
+
+**수동 API**: `POST /v1/feeds/{id}/reactivate` 엔드포인트 (ADR 002
+업데이트)로 운영자가 명시적으로 부활시킬 수 있다. 호출 시:
+
+1. `status = 'active'`
+2. `consecutive_failures = 0`
+3. `last_error_code = NULL`
+4. `next_fetch_at = now()` (즉시 다음 tick에 fetch)
+5. 응답: 갱신된 `FeedResponse`
 
 ### 임계값 (환경변수, 운영 중 조정 가능)
 
-- `BROKEN_THRESHOLD` — active → broken 전이 임계 (기본 3)
-- `DEAD_THRESHOLD` — broken → dead 전이 임계 (기본 30)
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `FEEDGATE_BROKEN_THRESHOLD` | 3 | active → broken 전이 연속 실패 수 |
+| `FEEDGATE_DEAD_DURATION_DAYS` | 7 | 마지막 성공 이후 이 기간이 지나면 broken → dead |
+| `FEEDGATE_BROKEN_MAX_BACKOFF_SECONDS` | 3600 | exponential backoff 상한 (1시간) |
+| `FEEDGATE_BACKOFF_JITTER_RATIO` | 0.25 | ±25% 지터 |
+| `FEEDGATE_DEAD_PROBE_INTERVAL_DAYS` | 7 | dead 피드 자동 재시도 주기 |
 
 수치는 운영 데이터를 보고 조정한다. ADR 개정 없이 바꿀 수 있다.
+
+### 관찰 가능성
+
+상태 전이 시 `logger.warning` 레벨 로그 1건 출력:
+
+```
+feed_id=42 url=... state=active->broken reason=consecutive_failures>=3
+feed_id=42 url=... state=broken->dead reason=7d_since_last_success
+feed_id=42 url=... state=dead->active reason=probe_succeeded
+feed_id=42 url=... state=dead->active reason=manual_reactivate
+```
+
+info 레벨은 현재 stdlib root logger가 WARNING 컷이라 안 보이므로
+전이는 warning으로 올림. 구조화 로깅 / 메트릭은 out-of-scope.
 
 ## 에러 코드 — 표 A
 
@@ -127,9 +240,9 @@ API는 이 값들을 노출하지 않는다.
 | `304 Not Modified` | 본문 없음. 성공 처리. 엔트리 변경 없음 |
 | `301 Moved Permanently` | Location 헤더로 `effective_url` 갱신. 새 URL로 1회 재시도 |
 | `302 / 307 / 308` | Location 따라가되 `effective_url` 불변 |
-| `4xx` (410 제외) | 실패 처리, `last_error_code = http_4xx` |
+| `4xx` (410/429 제외) | 실패 처리, `last_error_code = http_4xx` |
 | `410 Gone` | 즉시 `status = dead`, `last_error_code = http_410` |
-| `429` | 실패 처리, `rate_limited`, 스케줄러가 백오프 |
+| `429` | **특수 처리** — "429 Rate Limited 특수 처리" 섹션 참조. counters/상태 불변, `Retry-After` 존중 |
 | `5xx` | 실패 처리, `http_5xx` |
 
 4. Content-Type이 `application/rss+xml`, `application/atom+xml`,

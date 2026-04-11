@@ -28,6 +28,7 @@ On failure:
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timedelta
 
 import httpx
@@ -54,6 +55,65 @@ class ResponseTooLargeError(Exception):
 
 DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
 DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
+DEFAULT_BROKEN_THRESHOLD: int = 3
+DEFAULT_DEAD_DURATION_DAYS: int = 7
+DEFAULT_BROKEN_MAX_BACKOFF_SECONDS: int = 3600
+DEFAULT_BACKOFF_JITTER_RATIO: float = 0.25
+
+
+def _compute_next_fetch_at(
+    feed: Feed,
+    *,
+    now: datetime,
+    base_interval_seconds: int,
+    broken_threshold: int,
+    broken_max_backoff_seconds: int,
+    backoff_jitter_ratio: float,
+) -> datetime:
+    """Pick the next fetch instant based on the feed's current status.
+
+    Active and dead feeds use the plain ``base_interval_seconds``
+    (dead feeds are filtered out by the scheduler anyway, so the
+    value is irrelevant for them, but we still set it for
+    consistency). Broken feeds use exponential backoff:
+
+        excess_failures = max(0, consecutive_failures - broken_threshold)
+        factor = 2 ** excess_failures
+        raw = base_interval_seconds * factor
+        capped = min(raw, broken_max_backoff_seconds)
+        jitter = uniform(-ratio, +ratio) * capped
+        next = now + (capped + jitter) seconds
+
+    The jitter prevents thundering-herd recovery when many feeds
+    transition to broken together due to a shared upstream outage.
+    """
+    if feed.status != "broken":
+        return now + timedelta(seconds=base_interval_seconds)
+
+    excess = max(0, feed.consecutive_failures - broken_threshold)
+    factor = 2**excess
+    raw_interval = base_interval_seconds * factor
+    capped = min(raw_interval, broken_max_backoff_seconds)
+    jitter_span = backoff_jitter_ratio * capped
+    jitter = random.uniform(-jitter_span, jitter_span)
+    return now + timedelta(seconds=capped + jitter)
+
+
+def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
+    """Emit a WARNING-level log entry for a feed lifecycle transition.
+
+    INFO is currently swallowed by the default stdlib root logger
+    configuration, so lifecycle moves go out at WARNING level to
+    ensure operator visibility (see spec/feed.md "관찰 가능성").
+    """
+    logger.warning(
+        "feed_id=%s url=%s state=%s->%s reason=%s",
+        feed.id,
+        feed.effective_url,
+        feed.status,
+        new_status,
+        reason,
+    )
 
 
 # Content types that unambiguously indicate "this is not a feed".
@@ -77,6 +137,22 @@ def _is_not_a_feed_content_type(ct: str | None) -> bool:
         return False
     base = ct.split(";", 1)[0].strip().lower()
     return base in NOT_A_FEED_CONTENT_TYPES
+
+
+def _parse_retry_after(header: str | None) -> int | None:
+    """Parse the integer-seconds form of the ``Retry-After`` header.
+
+    Retry-After can also be an HTTP-date, but we only support the
+    integer-seconds form for the walking skeleton; HTTP-date is
+    vanishingly rare for 429 responses in practice.
+    """
+    if header is None:
+        return None
+    try:
+        value = int(header.strip())
+    except (TypeError, ValueError):
+        return None
+    return max(0, value)
 
 
 def _classify_error(exc: BaseException) -> str:
@@ -111,10 +187,12 @@ async def fetch_one(
     user_agent: str,
     max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
     max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
+    broken_threshold: int = DEFAULT_BROKEN_THRESHOLD,
+    dead_duration_days: int = DEFAULT_DEAD_DURATION_DAYS,
+    broken_max_backoff_seconds: int = DEFAULT_BROKEN_MAX_BACKOFF_SECONDS,
+    backoff_jitter_ratio: float = DEFAULT_BACKOFF_JITTER_RATIO,
 ) -> None:
-    next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
-    feed.next_fetch_at = next_at
 
     try:
         async with http_client.stream(
@@ -123,6 +201,21 @@ async def fetch_one(
             headers={"User-Agent": user_agent},
             follow_redirects=True,
         ) as response:
+            # 429 Rate Limited is NOT a circuit-breaker failure
+            # (spec/feed.md). Honor Retry-After, record the code,
+            # leave consecutive_failures and status alone, and bail
+            # out of fetch_one early. We do NOT update
+            # last_successful_fetch_at because we didn't succeed.
+            if response.status_code == 429:
+                retry_after = _parse_retry_after(response.headers.get("retry-after"))
+                wait_seconds = retry_after if retry_after is not None else 0
+                # Floor at base interval — don't hammer the upstream
+                # faster than our normal poll rate even if it says "10s".
+                wait_seconds = max(wait_seconds, interval_seconds)
+                feed.last_error_code = "rate_limited"
+                feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
+                return
+
             response.raise_for_status()
 
             ct = response.headers.get("content-type")
@@ -160,6 +253,9 @@ async def fetch_one(
         feed.last_successful_fetch_at = now
         feed.last_error_code = None
         feed.consecutive_failures = 0
+        if feed.status != "active":
+            _log_transition(feed, "active", reason="fetch_succeeded")
+            feed.status = "active"
     except Exception as exc:
         code = _classify_error(exc)
         feed.last_error_code = code
@@ -171,3 +267,47 @@ async def fetch_one(
             code,
             exc,
         )
+
+        # Lifecycle transitions (spec/feed.md — circuit breaker + 410)
+        if code == "http_410":
+            if feed.status != "dead":
+                _log_transition(feed, "dead", reason="http_410")
+                feed.status = "dead"
+        else:
+            # active -> broken on threshold
+            if feed.status == "active" and feed.consecutive_failures >= broken_threshold:
+                _log_transition(
+                    feed,
+                    "broken",
+                    reason=f"consecutive_failures>={broken_threshold}",
+                )
+                feed.status = "broken"
+            # broken -> dead on time since last success (fall-through
+            # allowed: if active just flipped to broken above AND the
+            # feed already has no success for dead_duration_days, we
+            # transition straight through to dead in the same call)
+            if feed.status == "broken":
+                reference = feed.last_successful_fetch_at or feed.created_at
+                if reference is not None and (
+                    now - reference >= timedelta(days=dead_duration_days)
+                ):
+                    _log_transition(
+                        feed,
+                        "dead",
+                        reason=f"no_success_for_>={dead_duration_days}d",
+                    )
+                    feed.status = "dead"
+
+    # Schedule the next fetch based on the final status. Active feeds
+    # use base_interval_seconds; broken feeds use exponential backoff
+    # with ±jitter; dead feeds are filtered out by the scheduler so
+    # their next_fetch_at is effectively unused but still set for
+    # consistency.
+    feed.next_fetch_at = _compute_next_fetch_at(
+        feed,
+        now=now,
+        base_interval_seconds=interval_seconds,
+        broken_threshold=broken_threshold,
+        broken_max_backoff_seconds=broken_max_backoff_seconds,
+        backoff_jitter_ratio=backoff_jitter_ratio,
+    )
