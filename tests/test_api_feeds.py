@@ -165,11 +165,14 @@ async def test_list_feeds_status_filter_returns_only_matching(
 
 
 @pytest.mark.asyncio
-async def test_list_feeds_invalid_status_returns_400(
+async def test_list_feeds_invalid_status_returns_422(
     api_client: AsyncClient,
 ) -> None:
+    """Invalid ``?status=`` values are rejected by FastAPI/Pydantic query
+    validation and surface as HTTP 422, matching the rest of the API
+    (see test_entries_feed_ids_required)."""
     resp = await api_client.get("/v1/feeds", params={"status": "zombie"})
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

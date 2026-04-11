@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from sqlalchemy import and_, or_, select
 
 from feedgate.fetcher.http import fetch_one
+from feedgate.lifecycle import FeedStatus
 from feedgate.models import Feed
 
 logger = logging.getLogger(__name__)
@@ -102,12 +103,12 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
             or_(
                 # Non-dead, due for fetch
                 and_(
-                    Feed.status != "dead",
+                    Feed.status != FeedStatus.DEAD,
                     Feed.next_fetch_at <= now,
                 ),
                 # Dead, eligible for a weekly probe
                 and_(
-                    Feed.status == "dead",
+                    Feed.status == FeedStatus.DEAD,
                     or_(
                         Feed.last_attempt_at.is_(None),
                         Feed.last_attempt_at < probe_cutoff,
