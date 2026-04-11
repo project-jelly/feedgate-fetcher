@@ -31,11 +31,12 @@ import logging
 from datetime import datetime, timedelta
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
-from feedgate.models import Feed
+from feedgate.models import Entry, Feed
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class ResponseTooLargeError(Exception):
 
 
 DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
+DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
 
 
 # Content types that unambiguously indicate "this is not a feed".
@@ -108,6 +110,7 @@ async def fetch_one(
     interval_seconds: int,
     user_agent: str,
     max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
+    max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
 ) -> None:
     next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
@@ -136,8 +139,21 @@ async def fetch_one(
             body = b"".join(body_parts)
 
         parsed = await parse_feed(body)
-        if parsed.entries:
-            await upsert_entries(session, feed.id, parsed.entries, now=now)
+        entries_to_upsert = parsed.entries
+        if entries_to_upsert:
+            existing_count = (
+                await session.execute(
+                    select(func.count()).select_from(Entry).where(Entry.feed_id == feed.id)
+                )
+            ).scalar_one()
+            # Initial-fetch cap: a brand-new feed that advertises hundreds
+            # of entries (OpenAI emits ~909, Hugging Face ~762) gets
+            # truncated to the top N most-recent, matching what Feedly
+            # does in production. Subsequent fetches ignore the cap —
+            # the delta is almost always small and ON CONFLICT dedups.
+            if existing_count == 0 and len(entries_to_upsert) > max_entries_initial:
+                entries_to_upsert = entries_to_upsert[:max_entries_initial]
+            await upsert_entries(session, feed.id, entries_to_upsert, now=now)
 
         if parsed.title:
             feed.title = parsed.title

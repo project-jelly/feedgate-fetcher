@@ -254,6 +254,110 @@ async def test_fetch_one_rejects_html_content_type_as_not_a_feed(
     assert await _count_entries_for_feed(sf, feed_id) == 0
 
 
+MANY_ATOM_ENTRIES = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Many entries feed</title>
+  <id>http://t.test/many</id>
+  <updated>2026-04-10T00:00:00Z</updated>
+  <entry><title>E0</title><id>http://t.test/many/e0</id><link href="http://t.test/many/e0"/><published>2026-04-10T00:00:00Z</published><content>b0</content></entry>
+  <entry><title>E1</title><id>http://t.test/many/e1</id><link href="http://t.test/many/e1"/><published>2026-04-10T01:00:00Z</published><content>b1</content></entry>
+  <entry><title>E2</title><id>http://t.test/many/e2</id><link href="http://t.test/many/e2"/><published>2026-04-10T02:00:00Z</published><content>b2</content></entry>
+  <entry><title>E3</title><id>http://t.test/many/e3</id><link href="http://t.test/many/e3"/><published>2026-04-10T03:00:00Z</published><content>b3</content></entry>
+  <entry><title>E4</title><id>http://t.test/many/e4</id><link href="http://t.test/many/e4"/><published>2026-04-10T04:00:00Z</published><content>b4</content></entry>
+  <entry><title>E5</title><id>http://t.test/many/e5</id><link href="http://t.test/many/e5"/><published>2026-04-10T05:00:00Z</published><content>b5</content></entry>
+</feed>
+"""
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_caps_initial_fetch_entries(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Brand-new feed with many entries must be truncated to
+    ``max_entries_initial`` on the first fetch."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/many"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=MANY_ATOM_ENTRIES,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_entries_initial=3,
+        )
+        await session.commit()
+
+    assert await _count_entries_for_feed(sf, feed_id) == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_no_cap_on_subsequent_fetch(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Once a feed already has some entries, the initial cap must
+    NOT apply — later fetches can bring in more entries than the cap."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/many"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=MANY_ATOM_ENTRIES,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    # First fetch with cap=3 → 3 entries persisted
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_entries_initial=3,
+        )
+        await session.commit()
+
+    assert await _count_entries_for_feed(sf, feed_id) == 3
+
+    # Second fetch with the same feed body (6 entries) and the same cap:
+    # the cap must NOT apply because existing_count > 0. All 6 entries
+    # should end up in the DB (3 existing upserted + 3 new).
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 1, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_entries_initial=3,
+        )
+        await session.commit()
+
+    assert await _count_entries_for_feed(sf, feed_id) == 6
+
+
 @pytest.mark.asyncio
 async def test_fetch_one_rejects_oversized_response_as_too_large(
     fetch_app: FastAPI,
