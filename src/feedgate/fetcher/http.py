@@ -28,6 +28,7 @@ On failure:
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timedelta
 
 import httpx
@@ -56,6 +57,46 @@ DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
 DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
 DEFAULT_BROKEN_THRESHOLD: int = 3
 DEFAULT_DEAD_DURATION_DAYS: int = 7
+DEFAULT_BROKEN_MAX_BACKOFF_SECONDS: int = 3600
+DEFAULT_BACKOFF_JITTER_RATIO: float = 0.25
+
+
+def _compute_next_fetch_at(
+    feed: Feed,
+    *,
+    now: datetime,
+    base_interval_seconds: int,
+    broken_threshold: int,
+    broken_max_backoff_seconds: int,
+    backoff_jitter_ratio: float,
+) -> datetime:
+    """Pick the next fetch instant based on the feed's current status.
+
+    Active and dead feeds use the plain ``base_interval_seconds``
+    (dead feeds are filtered out by the scheduler anyway, so the
+    value is irrelevant for them, but we still set it for
+    consistency). Broken feeds use exponential backoff:
+
+        excess_failures = max(0, consecutive_failures - broken_threshold)
+        factor = 2 ** excess_failures
+        raw = base_interval_seconds * factor
+        capped = min(raw, broken_max_backoff_seconds)
+        jitter = uniform(-ratio, +ratio) * capped
+        next = now + (capped + jitter) seconds
+
+    The jitter prevents thundering-herd recovery when many feeds
+    transition to broken together due to a shared upstream outage.
+    """
+    if feed.status != "broken":
+        return now + timedelta(seconds=base_interval_seconds)
+
+    excess = max(0, feed.consecutive_failures - broken_threshold)
+    factor = 2**excess
+    raw_interval = base_interval_seconds * factor
+    capped = min(raw_interval, broken_max_backoff_seconds)
+    jitter_span = backoff_jitter_ratio * capped
+    jitter = random.uniform(-jitter_span, jitter_span)
+    return now + timedelta(seconds=capped + jitter)
 
 
 def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
@@ -132,10 +173,10 @@ async def fetch_one(
     max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
     broken_threshold: int = DEFAULT_BROKEN_THRESHOLD,
     dead_duration_days: int = DEFAULT_DEAD_DURATION_DAYS,
+    broken_max_backoff_seconds: int = DEFAULT_BROKEN_MAX_BACKOFF_SECONDS,
+    backoff_jitter_ratio: float = DEFAULT_BACKOFF_JITTER_RATIO,
 ) -> None:
-    next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
-    feed.next_fetch_at = next_at
 
     try:
         async with http_client.stream(
@@ -225,3 +266,17 @@ async def fetch_one(
                         reason=f"no_success_for_>={dead_duration_days}d",
                     )
                     feed.status = "dead"
+
+    # Schedule the next fetch based on the final status. Active feeds
+    # use base_interval_seconds; broken feeds use exponential backoff
+    # with ±jitter; dead feeds are filtered out by the scheduler so
+    # their next_fetch_at is effectively unused but still set for
+    # consistency.
+    feed.next_fetch_at = _compute_next_fetch_at(
+        feed,
+        now=now,
+        base_interval_seconds=interval_seconds,
+        broken_threshold=broken_threshold,
+        broken_max_backoff_seconds=broken_max_backoff_seconds,
+        backoff_jitter_ratio=backoff_jitter_ratio,
+    )

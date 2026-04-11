@@ -52,6 +52,8 @@ async def _process_feed(
     max_entries_initial = getattr(app.state, "fetch_max_entries_initial", 50)
     broken_threshold = getattr(app.state, "broken_threshold", 3)
     dead_duration_days = getattr(app.state, "dead_duration_days", 7)
+    broken_max_backoff_seconds = getattr(app.state, "broken_max_backoff_seconds", 3600)
+    backoff_jitter_ratio = getattr(app.state, "backoff_jitter_ratio", 0.25)
 
     async with sem, sf() as session:
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
@@ -69,6 +71,8 @@ async def _process_feed(
                 max_entries_initial=max_entries_initial,
                 broken_threshold=broken_threshold,
                 dead_duration_days=dead_duration_days,
+                broken_max_backoff_seconds=broken_max_backoff_seconds,
+                backoff_jitter_ratio=backoff_jitter_ratio,
             )
             await session.commit()
         except Exception:

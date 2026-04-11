@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # transition from any state.
     broken_threshold: int = 3
     dead_duration_days: int = 7
+    broken_max_backoff_seconds: int = 3600
+    backoff_jitter_ratio: float = 0.25
 
 
 def get_settings() -> Settings:

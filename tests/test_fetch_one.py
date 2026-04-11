@@ -15,7 +15,7 @@ from httpx import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.fetcher.http import fetch_one
+from feedgate.fetcher.http import _compute_next_fetch_at, fetch_one
 from feedgate.models import Entry, Feed
 
 ATOM_BODY = b"""<?xml version="1.0" encoding="utf-8"?>
@@ -698,3 +698,83 @@ async def test_fetch_one_accepts_blank_content_type(
     assert state["last_error_code"] is None
     assert state["last_successful_fetch_at"] is not None
     assert await _count_entries_for_feed(sf, feed_id) == 2
+
+
+# ---- next_fetch_at / exponential backoff (pure function tests) -------------
+
+
+def _fake_feed(status: str, consecutive_failures: int) -> Feed:
+    return Feed(
+        url="http://t.test/dummy",
+        effective_url="http://t.test/dummy",
+        status=status,
+        consecutive_failures=consecutive_failures,
+    )
+
+
+def test_compute_next_fetch_at_active_feed_uses_exact_base_interval() -> None:
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    feed = _fake_feed("active", 1)
+
+    result = _compute_next_fetch_at(
+        feed,
+        now=now,
+        base_interval_seconds=60,
+        broken_threshold=3,
+        broken_max_backoff_seconds=3600,
+        backoff_jitter_ratio=0.25,
+    )
+    assert result == now + timedelta(seconds=60)
+
+
+def test_compute_next_fetch_at_broken_at_threshold_boundary_uses_base_with_jitter() -> None:
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    # Just transitioned: consecutive_failures == threshold, excess = 0
+    feed = _fake_feed("broken", 3)
+
+    result = _compute_next_fetch_at(
+        feed,
+        now=now,
+        base_interval_seconds=60,
+        broken_threshold=3,
+        broken_max_backoff_seconds=3600,
+        backoff_jitter_ratio=0.25,
+    )
+    delta_seconds = (result - now).total_seconds()
+    # factor=1, raw=60, jitter in [-15, +15]
+    assert 45 <= delta_seconds <= 75
+
+
+def test_compute_next_fetch_at_broken_feed_exponential_factor() -> None:
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    # excess = 5 - 3 = 2, factor = 4, raw = 240s, jitter [-60, +60]
+    feed = _fake_feed("broken", 5)
+
+    result = _compute_next_fetch_at(
+        feed,
+        now=now,
+        base_interval_seconds=60,
+        broken_threshold=3,
+        broken_max_backoff_seconds=3600,
+        backoff_jitter_ratio=0.25,
+    )
+    delta_seconds = (result - now).total_seconds()
+    assert 180 <= delta_seconds <= 300
+
+
+def test_compute_next_fetch_at_broken_feed_capped_at_max_backoff() -> None:
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    # excess = 20 - 3 = 17, factor = 2**17 = 131072, raw ~= 7.8M s,
+    # capped at 3600s, jitter [-900, +900]
+    feed = _fake_feed("broken", 20)
+
+    result = _compute_next_fetch_at(
+        feed,
+        now=now,
+        base_interval_seconds=60,
+        broken_threshold=3,
+        broken_max_backoff_seconds=3600,
+        backoff_jitter_ratio=0.25,
+    )
+    delta_seconds = (result - now).total_seconds()
+    assert 2700 <= delta_seconds <= 4500
