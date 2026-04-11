@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     dead_duration_days: int = 7
     broken_max_backoff_seconds: int = 3600
     backoff_jitter_ratio: float = 0.25
+    dead_probe_interval_days: int = 7
 
 
 def get_settings() -> Settings:

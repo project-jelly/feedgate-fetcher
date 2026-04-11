@@ -98,6 +98,7 @@ def create_app() -> FastAPI:
     app.state.dead_duration_days = settings.dead_duration_days
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
     app.state.backoff_jitter_ratio = settings.backoff_jitter_ratio
+    app.state.dead_probe_interval_days = settings.dead_probe_interval_days
     register_routers(app)
     return app
 

@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from feedgate.fetcher.http import fetch_one
 from feedgate.models import Feed
@@ -81,12 +81,44 @@ async def _process_feed(
 
 
 async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
-    """Run one scheduler iteration across every active feed."""
+    """Run one scheduler iteration.
+
+    Two classes of feeds are picked up on each tick:
+
+      1. Non-dead feeds (active + broken) whose ``next_fetch_at`` is
+         due. This respects the per-feed exponential backoff for
+         broken feeds — they are only polled when their own schedule
+         says so.
+      2. Dead feeds whose ``last_attempt_at`` is older than
+         ``dead_probe_interval_days`` (weekly probe, spec/feed.md).
+         Dead feeds never had their backoff respected anyway (once
+         dead you never come back via the normal path) — the probe
+         is the only way they can get re-fetched.
+    """
     now = now or datetime.now(UTC)
+    dead_probe_interval_days = getattr(app.state, "dead_probe_interval_days", 7)
+    probe_cutoff = now - timedelta(days=dead_probe_interval_days)
 
     sf = app.state.session_factory
     async with sf() as session:
-        result = await session.execute(select(Feed.id).where(Feed.status == "active"))
+        stmt = select(Feed.id).where(
+            or_(
+                # Non-dead, due for fetch
+                and_(
+                    Feed.status != "dead",
+                    Feed.next_fetch_at <= now,
+                ),
+                # Dead, eligible for a weekly probe
+                and_(
+                    Feed.status == "dead",
+                    or_(
+                        Feed.last_attempt_at.is_(None),
+                        Feed.last_attempt_at < probe_cutoff,
+                    ),
+                ),
+            )
+        )
+        result = await session.execute(stmt)
         feed_ids = [row[0] for row in result.all()]
 
     if not feed_ids:
