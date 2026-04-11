@@ -212,3 +212,222 @@ async def test_fetch_one_second_success_resets_failure_counter(
     assert state2["consecutive_failures"] == 0
     assert state2["last_error_code"] is None
     assert state2["last_successful_fetch_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_rejects_html_content_type_as_not_a_feed(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """200 OK + ``text/html`` body must be recorded as ``not_a_feed``
+    and must not insert any entries, even if the body looks parseable.
+    """
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/html-cloaking-as-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    # A Cloudflare WAF page or a 200 OK HTML error page — not a feed.
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=b"<html><body>Attention Required</body></html>",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == "not_a_feed"
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 1
+    assert await _count_entries_for_feed(sf, feed_id) == 0
+
+
+MANY_ATOM_ENTRIES = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Many entries feed</title>
+  <id>http://t.test/many</id>
+  <updated>2026-04-10T00:00:00Z</updated>
+  <entry><title>E0</title><id>http://t.test/many/e0</id><link href="http://t.test/many/e0"/><published>2026-04-10T00:00:00Z</published><content>b0</content></entry>
+  <entry><title>E1</title><id>http://t.test/many/e1</id><link href="http://t.test/many/e1"/><published>2026-04-10T01:00:00Z</published><content>b1</content></entry>
+  <entry><title>E2</title><id>http://t.test/many/e2</id><link href="http://t.test/many/e2"/><published>2026-04-10T02:00:00Z</published><content>b2</content></entry>
+  <entry><title>E3</title><id>http://t.test/many/e3</id><link href="http://t.test/many/e3"/><published>2026-04-10T03:00:00Z</published><content>b3</content></entry>
+  <entry><title>E4</title><id>http://t.test/many/e4</id><link href="http://t.test/many/e4"/><published>2026-04-10T04:00:00Z</published><content>b4</content></entry>
+  <entry><title>E5</title><id>http://t.test/many/e5</id><link href="http://t.test/many/e5"/><published>2026-04-10T05:00:00Z</published><content>b5</content></entry>
+</feed>
+"""
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_caps_initial_fetch_entries(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Brand-new feed with many entries must be truncated to
+    ``max_entries_initial`` on the first fetch."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/many"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=MANY_ATOM_ENTRIES,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_entries_initial=3,
+        )
+        await session.commit()
+
+    assert await _count_entries_for_feed(sf, feed_id) == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_no_cap_on_subsequent_fetch(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Once a feed already has some entries, the initial cap must
+    NOT apply — later fetches can bring in more entries than the cap."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/many"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=MANY_ATOM_ENTRIES,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    # First fetch with cap=3 → 3 entries persisted
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_entries_initial=3,
+        )
+        await session.commit()
+
+    assert await _count_entries_for_feed(sf, feed_id) == 3
+
+    # Second fetch with the same feed body (6 entries) and the same cap:
+    # the cap must NOT apply because existing_count > 0. All 6 entries
+    # should end up in the DB (3 existing upserted + 3 new).
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 1, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_entries_initial=3,
+        )
+        await session.commit()
+
+    assert await _count_entries_for_feed(sf, feed_id) == 6
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_rejects_oversized_response_as_too_large(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A response body larger than ``max_bytes`` must be rejected as
+    ``too_large`` with no entries persisted and no successful-fetch
+    timer advance."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/huge-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    # 4 KB payload, cap set to 1 KB below.
+    oversized = b"<feed>" + (b"x" * 4096) + b"</feed>"
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=oversized,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            max_bytes=1024,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == "too_large"
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 1
+    assert await _count_entries_for_feed(sf, feed_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_accepts_blank_content_type(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """No Content-Type header + valid XML must still succeed — many
+    real-world feeds ship empty or unusual Content-Type values."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/blank-ct-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(200, content=ATOM_BODY),
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] is None
+    assert state["last_successful_fetch_at"] is not None
+    assert await _count_entries_for_feed(sf, feed_id) == 2

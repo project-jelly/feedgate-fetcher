@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
+from feedgate import retention
 from feedgate.api import register_routers
 from feedgate.config import get_settings
 from feedgate.db import make_engine, make_session_factory
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scheduler_task: asyncio.Task[None] | None = None
+        retention_task: asyncio.Task[None] | None = None
         if settings.scheduler_enabled:
             scheduler_task = asyncio.create_task(scheduler.run(app))
             logger.info(
@@ -60,13 +62,24 @@ def create_app() -> FastAPI:
             )
         else:
             logger.info("scheduler disabled via FEEDGATE_SCHEDULER_ENABLED=false")
+        if settings.retention_enabled:
+            retention_task = asyncio.create_task(retention.run(app))
+            logger.info(
+                "retention sweeper started, interval=%ss days=%s min_per_feed=%s",
+                settings.retention_sweep_interval_seconds,
+                settings.retention_days,
+                settings.retention_min_per_feed,
+            )
+        else:
+            logger.info("retention disabled via FEEDGATE_RETENTION_ENABLED=false")
         try:
             yield
         finally:
-            if scheduler_task is not None:
-                scheduler_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await scheduler_task
+            for task in (scheduler_task, retention_task):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
             await http_client.aclose()
             await engine.dispose()
 
@@ -75,7 +88,12 @@ def create_app() -> FastAPI:
     app.state.http_client = http_client
     app.state.fetch_interval_seconds = settings.fetch_interval_seconds
     app.state.fetch_user_agent = settings.fetch_user_agent
+    app.state.fetch_max_bytes = settings.fetch_max_bytes
+    app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
     app.state.fetch_concurrency = DEFAULT_CONCURRENCY
+    app.state.retention_days = settings.retention_days
+    app.state.retention_min_per_feed = settings.retention_min_per_feed
+    app.state.retention_sweep_interval_seconds = settings.retention_sweep_interval_seconds
     register_routers(app)
     return app
 

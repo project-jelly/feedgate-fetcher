@@ -31,17 +31,60 @@ import logging
 from datetime import datetime, timedelta
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
-from feedgate.models import Feed
+from feedgate.models import Entry, Feed
 
 logger = logging.getLogger(__name__)
 
 
+class NotAFeedError(Exception):
+    """Raised when a 200 OK response carries a Content-Type that is
+    clearly not an RSS/Atom/XML feed (html, json, plain text)."""
+
+
+class ResponseTooLargeError(Exception):
+    """Raised when the streamed response body exceeds the configured
+    size cap (``FETCH_MAX_BYTES``). Raised mid-stream so we never load
+    the full oversized body into memory."""
+
+
+DEFAULT_FETCH_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
+DEFAULT_FETCH_MAX_ENTRIES_INITIAL: int = 50
+
+
+# Content types that unambiguously indicate "this is not a feed".
+# We intentionally do NOT maintain an allow-list because many feeds
+# serve odd values like ``application/octet-stream`` (Python Insider)
+# or omit the header entirely; feedparser handles those just fine.
+NOT_A_FEED_CONTENT_TYPES: frozenset[str] = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+        "application/json",
+        "application/ld+json",
+        "text/plain",
+    }
+)
+
+
+def _is_not_a_feed_content_type(ct: str | None) -> bool:
+    """Return True if the Content-Type header is clearly not a feed."""
+    if not ct:
+        return False
+    base = ct.split(";", 1)[0].strip().lower()
+    return base in NOT_A_FEED_CONTENT_TYPES
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map a fetch exception to a short error code."""
+    if isinstance(exc, NotAFeedError):
+        return "not_a_feed"
+    if isinstance(exc, ResponseTooLargeError):
+        return "too_large"
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
     if isinstance(exc, httpx.ConnectError):
@@ -66,23 +109,51 @@ async def fetch_one(
     now: datetime,
     interval_seconds: int,
     user_agent: str,
+    max_bytes: int = DEFAULT_FETCH_MAX_BYTES,
+    max_entries_initial: int = DEFAULT_FETCH_MAX_ENTRIES_INITIAL,
 ) -> None:
     next_at = now + timedelta(seconds=interval_seconds)
     feed.last_attempt_at = now
     feed.next_fetch_at = next_at
 
     try:
-        response = await http_client.get(
+        async with http_client.stream(
+            "GET",
             feed.effective_url,
             headers={"User-Agent": user_agent},
             follow_redirects=True,
-        )
-        response.raise_for_status()
-        body = response.content
+        ) as response:
+            response.raise_for_status()
+
+            ct = response.headers.get("content-type")
+            if _is_not_a_feed_content_type(ct):
+                raise NotAFeedError(f"unexpected content-type: {ct}")
+
+            body_parts: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                body_parts.append(chunk)
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ResponseTooLargeError(f"body exceeded {max_bytes} bytes")
+            body = b"".join(body_parts)
 
         parsed = await parse_feed(body)
-        if parsed.entries:
-            await upsert_entries(session, feed.id, parsed.entries, now=now)
+        entries_to_upsert = parsed.entries
+        if entries_to_upsert:
+            existing_count = (
+                await session.execute(
+                    select(func.count()).select_from(Entry).where(Entry.feed_id == feed.id)
+                )
+            ).scalar_one()
+            # Initial-fetch cap: a brand-new feed that advertises hundreds
+            # of entries (OpenAI emits ~909, Hugging Face ~762) gets
+            # truncated to the top N most-recent, matching what Feedly
+            # does in production. Subsequent fetches ignore the cap —
+            # the delta is almost always small and ON CONFLICT dedups.
+            if existing_count == 0 and len(entries_to_upsert) > max_entries_initial:
+                entries_to_upsert = entries_to_upsert[:max_entries_initial]
+            await upsert_entries(session, feed.id, entries_to_upsert, now=now)
 
         if parsed.title:
             feed.title = parsed.title
