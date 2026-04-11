@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
+from feedgate.lifecycle import ErrorCode, FeedStatus
 from feedgate.models import Entry, Feed
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ def _compute_next_fetch_at(
     The jitter prevents thundering-herd recovery when many feeds
     transition to broken together due to a shared upstream outage.
     """
-    if feed.status != "broken":
+    if feed.status != FeedStatus.BROKEN:
         return now + timedelta(seconds=base_interval_seconds)
 
     excess = max(0, feed.consecutive_failures - broken_threshold)
@@ -147,26 +148,26 @@ def _parse_retry_after(header: str | None) -> int | None:
     return max(0, value)
 
 
-def _classify_error(exc: BaseException) -> str:
+def _classify_error(exc: BaseException) -> ErrorCode:
     """Map a fetch exception to a short error code."""
     if isinstance(exc, NotAFeedError):
-        return "not_a_feed"
+        return ErrorCode.NOT_A_FEED
     if isinstance(exc, ResponseTooLargeError):
-        return "too_large"
+        return ErrorCode.TOO_LARGE
     if isinstance(exc, httpx.TimeoutException):
-        return "timeout"
+        return ErrorCode.TIMEOUT
     if isinstance(exc, httpx.ConnectError):
-        return "connection"
+        return ErrorCode.CONNECTION
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 410:
-            return "http_410"
+            return ErrorCode.HTTP_410
         if 400 <= status < 500:
-            return "http_4xx"
-        return "http_5xx"
+            return ErrorCode.HTTP_4XX
+        return ErrorCode.HTTP_5XX
     if isinstance(exc, httpx.HTTPError):
-        return "http_error"
-    return "other"
+        return ErrorCode.HTTP_ERROR
+    return ErrorCode.OTHER
 
 
 async def fetch_one(
@@ -204,7 +205,7 @@ async def fetch_one(
                 # Floor at base interval — don't hammer the upstream
                 # faster than our normal poll rate even if it says "10s".
                 wait_seconds = max(wait_seconds, interval_seconds)
-                feed.last_error_code = "rate_limited"
+                feed.last_error_code = ErrorCode.RATE_LIMITED
                 feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
                 return
 
@@ -245,9 +246,9 @@ async def fetch_one(
         feed.last_successful_fetch_at = now
         feed.last_error_code = None
         feed.consecutive_failures = 0
-        if feed.status != "active":
-            _log_transition(feed, "active", reason="fetch_succeeded")
-            feed.status = "active"
+        if feed.status != FeedStatus.ACTIVE:
+            _log_transition(feed, FeedStatus.ACTIVE, reason="fetch_succeeded")
+            feed.status = FeedStatus.ACTIVE
     except Exception as exc:
         code = _classify_error(exc)
         feed.last_error_code = code
@@ -261,34 +262,34 @@ async def fetch_one(
         )
 
         # Lifecycle transitions (spec/feed.md — circuit breaker + 410)
-        if code == "http_410":
-            if feed.status != "dead":
-                _log_transition(feed, "dead", reason="http_410")
-                feed.status = "dead"
+        if code == ErrorCode.HTTP_410:
+            if feed.status != FeedStatus.DEAD:
+                _log_transition(feed, FeedStatus.DEAD, reason="http_410")
+                feed.status = FeedStatus.DEAD
         else:
             # active -> broken on threshold
-            if feed.status == "active" and feed.consecutive_failures >= broken_threshold:
+            if feed.status == FeedStatus.ACTIVE and feed.consecutive_failures >= broken_threshold:
                 _log_transition(
                     feed,
-                    "broken",
+                    FeedStatus.BROKEN,
                     reason=f"consecutive_failures>={broken_threshold}",
                 )
-                feed.status = "broken"
+                feed.status = FeedStatus.BROKEN
             # broken -> dead on time since last success (fall-through
             # allowed: if active just flipped to broken above AND the
             # feed already has no success for dead_duration_days, we
             # transition straight through to dead in the same call)
-            if feed.status == "broken":
+            if feed.status == FeedStatus.BROKEN:
                 reference = feed.last_successful_fetch_at or feed.created_at
                 if reference is not None and (
                     now - reference >= timedelta(days=dead_duration_days)
                 ):
                     _log_transition(
                         feed,
-                        "dead",
+                        FeedStatus.DEAD,
                         reason=f"no_success_for_>={dead_duration_days}d",
                     )
-                    feed.status = "dead"
+                    feed.status = FeedStatus.DEAD
 
     # Schedule the next fetch based on the final status. Active feeds
     # use base_interval_seconds; broken feeds use exponential backoff

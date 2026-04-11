@@ -15,6 +15,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from feedgate.lifecycle import ErrorCode, FeedStatus
+
 
 class FeedCreate(BaseModel):
     url: str = Field(..., min_length=1)
@@ -27,10 +29,10 @@ class FeedResponse(BaseModel):
     url: str
     effective_url: str
     title: str | None
-    status: str
+    status: FeedStatus
     last_successful_fetch_at: datetime | None
     last_attempt_at: datetime | None
-    last_error_code: str | None
+    last_error_code: ErrorCode | None
     created_at: datetime
 
 

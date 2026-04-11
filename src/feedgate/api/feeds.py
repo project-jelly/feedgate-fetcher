@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.api import get_session
+from feedgate.lifecycle import FeedStatus
 from feedgate.models import Feed
 from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate.urlnorm import normalize_url
@@ -24,8 +25,6 @@ from feedgate.urlnorm import normalize_url
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
-
-VALID_STATUSES: frozenset[str] = frozenset({"active", "broken", "dead"})
 
 
 @router.post(
@@ -58,7 +57,7 @@ async def list_feeds(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: int = 50,
     status_filter: Annotated[
-        str | None,
+        FeedStatus | None,
         Query(
             alias="status",
             description="Filter by lifecycle state (active | broken | dead)",
@@ -68,11 +67,6 @@ async def list_feeds(
     limit = max(1, min(limit, 200))
     stmt = select(Feed)
     if status_filter is not None:
-        if status_filter not in VALID_STATUSES:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"status must be one of {sorted(VALID_STATUSES)}",
-            )
         stmt = stmt.where(Feed.status == status_filter)
     stmt = stmt.order_by(Feed.id.asc()).limit(limit)
     result = await session.execute(stmt)
@@ -130,17 +124,17 @@ async def reactivate_feed(
     if feed is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="feed not found")
 
-    if feed.status != "active":
+    if feed.status != FeedStatus.ACTIVE:
         logger.warning(
             "feed_id=%s url=%s state=%s->%s reason=%s",
             feed.id,
             feed.effective_url,
             feed.status,
-            "active",
+            FeedStatus.ACTIVE,
             "manual_reactivate",
         )
 
-    feed.status = "active"
+    feed.status = FeedStatus.ACTIVE
     feed.consecutive_failures = 0
     feed.last_error_code = None
     feed.next_fetch_at = datetime.now(UTC)
