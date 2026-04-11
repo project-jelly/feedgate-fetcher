@@ -26,35 +26,12 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
-from sqlalchemy import text
+from sqlalchemy import delete, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger(__name__)
+from feedgate.models import Entry
 
-# Single statement that computes the keep-set (time window OR per-feed
-# top-N by fetched_at DESC) and deletes everything else. RETURNING id
-# lets the caller count deleted rows cheaply.
-SWEEP_SQL = text(
-    """
-    WITH ranked AS (
-        SELECT
-            id,
-            row_number() OVER (
-                PARTITION BY feed_id
-                ORDER BY fetched_at DESC, id DESC
-            ) AS rn
-        FROM entries
-    ),
-    keep AS (
-        SELECT id FROM entries WHERE fetched_at >= :cutoff
-        UNION
-        SELECT id FROM ranked WHERE rn <= :min_per_feed
-    )
-    DELETE FROM entries
-    WHERE id NOT IN (SELECT id FROM keep)
-    RETURNING id
-    """
-)
+logger = logging.getLogger(__name__)
 
 
 async def sweep(
@@ -65,13 +42,37 @@ async def sweep(
 ) -> int:
     """Delete aged-out entries that fall outside both retain windows.
 
-    Returns the number of rows deleted. Does not commit — the caller
-    is responsible for the transaction.
+    Uses SQLAlchemy 2.0 Core expressions end-to-end — a window-
+    function CTE computes per-feed row numbers, the keep set is a
+    UNION of the time window and the per-feed top-N, and the final
+    DELETE ... RETURNING is an ORM-level bulk delete. Returns the
+    number of rows deleted. Does not commit — the caller is
+    responsible for the transaction.
     """
-    result = await session.execute(
-        SWEEP_SQL,
-        {"cutoff": cutoff, "min_per_feed": min_per_feed},
+    # Per-feed ranking by fetched_at DESC, id DESC (matches the
+    # compound keyset index on entries).
+    ranked = select(
+        Entry.id.label("id"),
+        func.row_number()
+        .over(
+            partition_by=Entry.feed_id,
+            order_by=(Entry.fetched_at.desc(), Entry.id.desc()),
+        )
+        .label("rn"),
+    ).cte("ranked")
+
+    # Keep set: time window UNION per-feed top-N.
+    time_window = select(Entry.id).where(Entry.fetched_at >= cutoff)
+    top_n = select(ranked.c.id).where(ranked.c.rn <= min_per_feed)
+    keep = union(time_window, top_n).subquery("keep")
+
+    stmt = (
+        delete(Entry)
+        .where(Entry.id.not_in(select(keep.c.id)))
+        .returning(Entry.id)
+        .execution_options(synchronize_session=False)
     )
+    result = await session.execute(stmt)
     return len(result.fetchall())
 
 
