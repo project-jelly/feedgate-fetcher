@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
     fetch_concurrency: int = 4
+    # Distributed-claim tuning for the scheduler's SKIP LOCKED loop.
+    # A tick atomically reserves up to `fetch_claim_batch_size` feeds
+    # by advancing their `next_fetch_at` to `now + claim_ttl_seconds`
+    # (and `last_attempt_at = now`). Another worker running in
+    # parallel sees the bumped timestamps and skips the feed until the
+    # lease expires, giving crash-safe at-least-once semantics without
+    # an external queue.
+    fetch_claim_batch_size: int = 8
+    fetch_claim_ttl_seconds: int = 180
     scheduler_enabled: bool = True
 
     # Retention policy (ADR 004, docs/spec/entry.md).
