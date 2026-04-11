@@ -139,6 +139,22 @@ def _is_not_a_feed_content_type(ct: str | None) -> bool:
     return base in NOT_A_FEED_CONTENT_TYPES
 
 
+def _parse_retry_after(header: str | None) -> int | None:
+    """Parse the integer-seconds form of the ``Retry-After`` header.
+
+    Retry-After can also be an HTTP-date, but we only support the
+    integer-seconds form for the walking skeleton; HTTP-date is
+    vanishingly rare for 429 responses in practice.
+    """
+    if header is None:
+        return None
+    try:
+        value = int(header.strip())
+    except (TypeError, ValueError):
+        return None
+    return max(0, value)
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map a fetch exception to a short error code."""
     if isinstance(exc, NotAFeedError):
@@ -185,6 +201,21 @@ async def fetch_one(
             headers={"User-Agent": user_agent},
             follow_redirects=True,
         ) as response:
+            # 429 Rate Limited is NOT a circuit-breaker failure
+            # (spec/feed.md). Honor Retry-After, record the code,
+            # leave consecutive_failures and status alone, and bail
+            # out of fetch_one early. We do NOT update
+            # last_successful_fetch_at because we didn't succeed.
+            if response.status_code == 429:
+                retry_after = _parse_retry_after(response.headers.get("retry-after"))
+                wait_seconds = retry_after if retry_after is not None else 0
+                # Floor at base interval — don't hammer the upstream
+                # faster than our normal poll rate even if it says "10s".
+                wait_seconds = max(wait_seconds, interval_seconds)
+                feed.last_error_code = "rate_limited"
+                feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
+                return
+
             response.raise_for_status()
 
             ct = response.headers.get("content-type")

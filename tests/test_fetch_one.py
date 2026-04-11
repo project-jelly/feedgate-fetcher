@@ -7,6 +7,7 @@ HTTP is issued.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 import respx
@@ -51,7 +52,7 @@ async def _create_feed(session_factory: async_sessionmaker[AsyncSession], url: s
 
 async def _load_feed(
     session_factory: async_sessionmaker[AsyncSession], feed_id: int
-) -> dict[str, object]:
+) -> dict[str, Any]:
     async with session_factory() as session:
         row = (
             await session.execute(
@@ -710,6 +711,109 @@ def _fake_feed(status: str, consecutive_failures: int) -> Feed:
         status=status,
         consecutive_failures=consecutive_failures,
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_429_is_not_a_circuit_breaker_failure(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Repeated 429 responses must NOT increment consecutive_failures
+    and must NOT transition the feed state. 429 is "slow down", not
+    "you are broken". Only ``last_error_code`` is recorded."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/rate-limited"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(return_value=Response(429))
+
+    for i in range(5):
+        async with sf() as session:
+            feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+            await fetch_one(
+                session,
+                fetch_app.state.http_client,
+                feed,
+                now=datetime(2026, 4, 11, 0, i, 0, tzinfo=UTC),
+                interval_seconds=60,
+                user_agent="test-agent",
+                broken_threshold=3,
+            )
+            await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "active"
+    assert state["consecutive_failures"] == 0
+    assert state["last_error_code"] == "rate_limited"
+    assert state["last_successful_fetch_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_429_honors_retry_after_header(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """When Retry-After is present and >= base_interval, fetch_one
+    schedules next_fetch_at at ``now + retry_after``."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/retry-after-300"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(return_value=Response(429, headers={"Retry-After": "300"}))
+
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    # Retry-After 300s > base_interval 60s → use 300
+    assert delta == 300
+    assert state["last_error_code"] == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_429_floors_retry_after_at_base_interval(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Retry-After values shorter than base_interval must be clamped
+    up to base_interval — we never poll faster than our normal
+    schedule just because the upstream says "10s"."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/retry-after-small"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(return_value=Response(429, headers={"Retry-After": "10"}))
+
+    now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            broken_threshold=3,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    # Retry-After 10 < base_interval 60 → floor at 60
+    assert delta == 60
 
 
 def test_compute_next_fetch_at_active_feed_uses_exact_base_interval() -> None:
