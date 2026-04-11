@@ -21,10 +21,15 @@ The function does NOT commit — the caller owns the transaction.
 
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
 
+from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 # Single statement that computes the keep-set (time window OR per-feed
 # top-N by fetched_at DESC) and deletes everything else. RETURNING id
@@ -68,3 +73,62 @@ async def sweep(
         {"cutoff": cutoff, "min_per_feed": min_per_feed},
     )
     return len(result.fetchall())
+
+
+# ---- App-level wrappers ----------------------------------------------------
+
+
+async def tick_once(
+    app: FastAPI,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Run a single retention sweep using settings from ``app.state``.
+
+    Opens a dedicated session, computes the cutoff as
+    ``now - retention_days``, executes the sweep, commits on success,
+    rolls back on error. Returns the number of rows deleted.
+    """
+    now = now or datetime.now(UTC)
+    days: int = app.state.retention_days
+    min_per_feed: int = app.state.retention_min_per_feed
+    cutoff = now - timedelta(days=days)
+
+    sf = app.state.session_factory
+    async with sf() as session:
+        try:
+            n = await sweep(
+                session,
+                cutoff=cutoff,
+                min_per_feed=min_per_feed,
+            )
+            await session.commit()
+            return n
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def run(
+    app: FastAPI,
+    *,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Background loop that calls ``tick_once`` every interval.
+
+    TDD-exempt — thin wrapper around ``tick_once``, correctness is
+    covered by the sweep tests and the tick_once integration test.
+    Never lets the loop die: any exception is logged and swallowed.
+    """
+    interval = app.state.retention_sweep_interval_seconds
+    stop = stop_event or asyncio.Event()
+    while not stop.is_set():
+        try:
+            n = await tick_once(app)
+            logger.info("retention sweep deleted %d entries", n)
+        except Exception:
+            logger.exception("retention sweep raised; continuing")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            continue

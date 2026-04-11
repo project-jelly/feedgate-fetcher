@@ -12,9 +12,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
+from fastapi import FastAPI
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from feedgate import retention
 from feedgate.models import Entry, Feed
 from feedgate.retention import sweep
 
@@ -262,3 +265,61 @@ async def test_sweep_returns_zero_when_nothing_to_delete(
     )
     assert deleted == 0
     assert await _count_entries(async_session, feed_id) == 5
+
+
+# ---- retention.tick_once integration ---------------------------------------
+
+
+@pytest_asyncio.fixture
+async def retention_app(
+    async_session_factory: async_sessionmaker[AsyncSession],
+    truncate_tables: None,
+) -> FastAPI:
+    """Minimal FastAPI app with the state retention.tick_once reads."""
+    app = FastAPI()
+    app.state.session_factory = async_session_factory
+    app.state.retention_days = 90
+    app.state.retention_min_per_feed = 2
+    app.state.retention_sweep_interval_seconds = 3600
+    return app
+
+
+@pytest.mark.asyncio
+async def test_tick_once_runs_sweep_via_app_state(
+    retention_app: FastAPI,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """tick_once reads cutoff + min_per_feed from ``app.state``, opens
+    its own session, commits, and returns the delete count."""
+    # 5 ancient entries, retention_min_per_feed=2 in the fixture
+    # → tick_once deletes 3, keeps the 2 most recent.
+    ancient = datetime(2020, 1, 1, tzinfo=UTC)
+    async with async_session_factory() as session:
+        feed_id = await _mk_feed(session, "http://t.test/feed-tick")
+        for i in range(5):
+            await _mk_entry(
+                session,
+                feed_id,
+                guid=f"t-{i}",
+                fetched_at=ancient + timedelta(hours=i),
+            )
+        await session.commit()
+
+    now = datetime(2026, 4, 11, tzinfo=UTC)
+    deleted = await retention.tick_once(retention_app, now=now)
+    assert deleted == 3
+
+    async with async_session_factory() as session:
+        count = (
+            await session.execute(
+                select(func.count()).select_from(Entry).where(Entry.feed_id == feed_id)
+            )
+        ).scalar_one()
+        guids = {
+            row[0]
+            for row in (
+                await session.execute(select(Entry.guid).where(Entry.feed_id == feed_id))
+            ).all()
+        }
+    assert count == 2
+    assert guids == {"t-4", "t-3"}
