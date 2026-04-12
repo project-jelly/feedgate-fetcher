@@ -50,11 +50,18 @@ class Settings(BaseSettings):
     # On shutdown, the lifespan signals the background tasks via a
     # stop ``asyncio.Event`` and gives each one this many seconds to
     # finish its current iteration cleanly. Tasks that overrun the
-    # budget are force-cancelled. Set comfortably above the worst-
-    # case full tick (claim batch * per-feed ceiling) — a tick that
-    # actually finishes its work avoids leaving feeds half-claimed
-    # waiting for the SKIP LOCKED lease TTL to expire.
-    shutdown_drain_seconds: float = 30.0
+    # budget are force-cancelled.
+    #
+    # Sizing: a worst-case tick processes ``ceil(claim_batch_size /
+    # fetch_concurrency) * fetch_total_budget_seconds`` worth of
+    # serialized batches before its semaphore queue drains. With the
+    # default knobs (claim_batch_size=8, fetch_concurrency=4,
+    # fetch_total_budget=30s) that is ``2 * 30 = 60s``. We then add
+    # a 30s safety margin for retention sweep + DB commit slack.
+    # Anything shorter would force-cancel a healthy in-flight tick
+    # and leave its claimed feeds dangling until the SKIP LOCKED
+    # lease TTL (180s) expires.
+    shutdown_drain_seconds: float = 90.0
     # Distributed-claim tuning for the scheduler's SKIP LOCKED loop.
     # A tick atomically reserves up to `fetch_claim_batch_size` feeds
     # by advancing their `next_fetch_at` to `now + claim_ttl_seconds`
