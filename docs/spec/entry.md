@@ -1,12 +1,15 @@
 # Spec: Entry
 
-- 상태: Draft (구현 전)
-- 마지막 업데이트: 2026-04-10
+- 상태: Draft
+- 마지막 업데이트: 2026-04-12
 - 관련 ADR: 000, 001, 002, 004
+- 관련 spec: [`feed.md`](feed.md), [`resilience.md`](resilience.md)
 
 이 문서는 `entries` 엔티티의 **현재 구현 정의**다. 정책 결정은 ADR에 있고,
 이 spec은 테이블 스키마와 동작을 기술한다. Spec은 ADR 001의 불변식을
-깨지 않는 한 자유롭게 갱신할 수 있다.
+깨지 않는 한 자유롭게 갱신할 수 있다. **upsert 부하·body cap·initial
+fetch 제한 등 fetch 단위 방어선은 [`resilience.md`](resilience.md)에**
+정의되어 있다.
 
 ## 목적
 
