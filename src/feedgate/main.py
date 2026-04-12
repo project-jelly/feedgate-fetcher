@@ -51,7 +51,12 @@ def create_app() -> FastAPI:
     # fetch_one only catches the initial host; the transport guard is
     # what keeps a 302 to ``http://169.254.169.254/`` from leaking out.
     http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.fetch_timeout_seconds),
+        timeout=httpx.Timeout(
+            connect=settings.fetch_connect_timeout_seconds,
+            read=settings.fetch_read_timeout_seconds,
+            write=settings.fetch_write_timeout_seconds,
+            pool=settings.fetch_pool_timeout_seconds,
+        ),
         transport=SSRFGuardTransport(httpx.AsyncHTTPTransport()),
     )
 
@@ -94,6 +99,7 @@ def create_app() -> FastAPI:
     app.state.fetch_interval_seconds = settings.fetch_interval_seconds
     app.state.fetch_user_agent = settings.fetch_user_agent
     app.state.fetch_max_bytes = settings.fetch_max_bytes
+    app.state.fetch_total_budget_seconds = settings.fetch_total_budget_seconds
     app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
     app.state.fetch_concurrency = settings.fetch_concurrency
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size

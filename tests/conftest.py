@@ -162,6 +162,7 @@ async def fetch_app(
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
     app.state.fetch_max_bytes = settings.fetch_max_bytes
     app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
+    app.state.fetch_total_budget_seconds = settings.fetch_total_budget_seconds
     app.state.broken_threshold = settings.broken_threshold
     app.state.dead_duration_days = settings.dead_duration_days
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds

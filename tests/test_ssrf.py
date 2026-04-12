@@ -324,6 +324,7 @@ async def test_fetch_one_marks_blocked_when_host_resolves_to_private_ip(
             user_agent=fetch_app.state.fetch_user_agent,
             max_bytes=fetch_app.state.fetch_max_bytes,
             max_entries_initial=fetch_app.state.fetch_max_entries_initial,
+            total_budget_seconds=fetch_app.state.fetch_total_budget_seconds,
             broken_threshold=fetch_app.state.broken_threshold,
             dead_duration_days=fetch_app.state.dead_duration_days,
             broken_max_backoff_seconds=fetch_app.state.broken_max_backoff_seconds,
