@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from sqlalchemy import and_, or_, select
@@ -43,10 +44,23 @@ from feedgate.models import Feed
 logger = logging.getLogger(__name__)
 
 
+def _host_key(url: str) -> str:
+    """Extract a per-host throttle key from a feed URL.
+
+    Returns the lowercased hostname so ``Example.com`` and
+    ``example.com`` share a semaphore. Falls back to the empty string
+    when the URL has no hostname (literal IP feeds keep their address
+    as the key, which is the desired behavior — they still throttle
+    against themselves)."""
+    return (urlsplit(url).hostname or "").lower()
+
+
 async def _process_feed(
     feed_id: int,
     app: FastAPI,
     sem: asyncio.Semaphore,
+    host_sems: dict[str, asyncio.Semaphore],
+    per_host_concurrency: int,
     now: datetime,
 ) -> None:
     """Open a fresh session, load the feed, run fetch_one, commit."""
@@ -66,22 +80,33 @@ async def _process_feed(
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
         if feed is None:
             return
+        # Per-host throttle: setdefault is atomic under cooperative
+        # asyncio scheduling, so concurrent _process_feed coroutines
+        # for the same host see the same semaphore. ``async with`` it
+        # *inside* the global semaphore so we hold a global slot while
+        # waiting on the host slot — this keeps tick semantics simple
+        # (one acquire order, no deadlock potential).
+        host_sem = host_sems.setdefault(
+            _host_key(feed.effective_url),
+            asyncio.Semaphore(per_host_concurrency),
+        )
         try:
-            await fetch_one(
-                session,
-                http_client,
-                feed,
-                now=now,
-                interval_seconds=interval,
-                user_agent=ua,
-                max_bytes=max_bytes,
-                max_entries_initial=max_entries_initial,
-                total_budget_seconds=total_budget,
-                broken_threshold=broken_threshold,
-                dead_duration_days=dead_duration_days,
-                broken_max_backoff_seconds=broken_max_backoff_seconds,
-                backoff_jitter_ratio=backoff_jitter_ratio,
-            )
+            async with host_sem:
+                await fetch_one(
+                    session,
+                    http_client,
+                    feed,
+                    now=now,
+                    interval_seconds=interval,
+                    user_agent=ua,
+                    max_bytes=max_bytes,
+                    max_entries_initial=max_entries_initial,
+                    total_budget_seconds=total_budget,
+                    broken_threshold=broken_threshold,
+                    dead_duration_days=dead_duration_days,
+                    broken_max_backoff_seconds=broken_max_backoff_seconds,
+                    backoff_jitter_ratio=backoff_jitter_ratio,
+                )
             await session.commit()
         except Exception:
             await session.rollback()
@@ -178,7 +203,14 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
         return
 
     sem = asyncio.Semaphore(app.state.fetch_concurrency)
-    await asyncio.gather(*(_process_feed(fid, app, sem, now) for fid in feed_ids))
+    host_sems: dict[str, asyncio.Semaphore] = {}
+    per_host_concurrency = app.state.fetch_per_host_concurrency
+    await asyncio.gather(
+        *(
+            _process_feed(fid, app, sem, host_sems, per_host_concurrency, now)
+            for fid in feed_ids
+        )
+    )
 
 
 async def run(

@@ -296,6 +296,108 @@ async def test_tick_once_skips_recently_probed_dead_feed(
 
 
 @pytest.mark.asyncio
+async def test_per_host_throttle_serializes_same_host_feeds(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Two feeds on the same host must NOT be fetched simultaneously
+    within a tick. We seed two due feeds on ``same.test``, mock both
+    URLs with a side-effect that tracks concurrent in-flight count,
+    and assert ``max_in_flight == 1`` after the tick. Without the
+    per-host semaphore the global ``fetch_concurrency=4`` would let
+    both run in parallel and the test would observe 2."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    url_a = "http://same.test/a/feed"
+    url_b = "http://same.test/b/feed"
+
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+
+    async with sf() as session:
+        for u in (url_a, url_b):
+            session.add(
+                Feed(
+                    url=u,
+                    effective_url=u,
+                    next_fetch_at=now - timedelta(seconds=5),
+                )
+            )
+        await session.commit()
+
+    state = {"in_flight": 0, "max_in_flight": 0}
+
+    async def slow_response(request: object) -> Response:
+        state["in_flight"] += 1
+        state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        await asyncio.sleep(0.05)
+        state["in_flight"] -= 1
+        guid = str(request.url) + "/post-1"  # type: ignore[attr-defined]
+        return Response(
+            200,
+            content=_atom_with(guid, "throttle test"),
+            headers={"Content-Type": "application/atom+xml"},
+        )
+
+    respx_mock.get(url_a).mock(side_effect=slow_response)
+    respx_mock.get(url_b).mock(side_effect=slow_response)
+
+    await scheduler.tick_once(fetch_app, now=now)
+
+    assert state["max_in_flight"] == 1, (
+        f"per-host throttle leaked: max_in_flight={state['max_in_flight']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_host_throttle_allows_distinct_hosts_in_parallel(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """The per-host cap must NOT serialize feeds on *different* hosts.
+    Two feeds on host-a.test and host-b.test should run in parallel
+    under the global ``fetch_concurrency=4``, so the in-flight counter
+    must reach 2."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    url_a = "http://host-a.test/feed"
+    url_b = "http://host-b.test/feed"
+
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+
+    async with sf() as session:
+        for u in (url_a, url_b):
+            session.add(
+                Feed(
+                    url=u,
+                    effective_url=u,
+                    next_fetch_at=now - timedelta(seconds=5),
+                )
+            )
+        await session.commit()
+
+    state = {"in_flight": 0, "max_in_flight": 0}
+
+    async def slow_response(request: object) -> Response:
+        state["in_flight"] += 1
+        state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        await asyncio.sleep(0.05)
+        state["in_flight"] -= 1
+        guid = str(request.url) + "/post-1"  # type: ignore[attr-defined]
+        return Response(
+            200,
+            content=_atom_with(guid, "parallel test"),
+            headers={"Content-Type": "application/atom+xml"},
+        )
+
+    respx_mock.get(url_a).mock(side_effect=slow_response)
+    respx_mock.get(url_b).mock(side_effect=slow_response)
+
+    await scheduler.tick_once(fetch_app, now=now)
+
+    assert state["max_in_flight"] == 2, (
+        f"distinct hosts wrongly serialized: max_in_flight={state['max_in_flight']}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_claim_due_feeds_skip_locked_prevents_double_claim(
     fetch_app: FastAPI,
 ) -> None:

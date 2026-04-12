@@ -102,6 +102,7 @@ def create_app() -> FastAPI:
     app.state.fetch_total_budget_seconds = settings.fetch_total_budget_seconds
     app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
     app.state.fetch_concurrency = settings.fetch_concurrency
+    app.state.fetch_per_host_concurrency = settings.fetch_per_host_concurrency
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
     app.state.retention_days = settings.retention_days
