@@ -41,6 +41,7 @@ async def test_required_indexes_exist(async_engine: AsyncEngine) -> None:
     assert "ix_feeds_next_fetch_at_active" not in indexes
     assert "ix_entries_fetched_at" in indexes
     assert "ix_entries_feed_pub_id" in indexes
+    assert "ix_entries_feed_fetched_id" in indexes
 
 
 @pytest.mark.asyncio
