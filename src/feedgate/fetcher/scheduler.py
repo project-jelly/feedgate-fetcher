@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.http import fetch_one
@@ -143,35 +143,35 @@ async def _claim_due_feeds(
     to become visible to other workers.
     """
     probe_cutoff = now - timedelta(days=dead_probe_interval_days)
-    stmt = (
-        select(Feed)
-        .where(
+    claim_predicate = or_(
+        and_(
+            Feed.status != FeedStatus.DEAD,
+            Feed.next_fetch_at <= now,
+        ),
+        and_(
+            Feed.status == FeedStatus.DEAD,
             or_(
-                and_(
-                    Feed.status != FeedStatus.DEAD,
-                    Feed.next_fetch_at <= now,
-                ),
-                and_(
-                    Feed.status == FeedStatus.DEAD,
-                    or_(
-                        Feed.last_attempt_at.is_(None),
-                        Feed.last_attempt_at < probe_cutoff,
-                    ),
-                ),
-            )
-        )
+                Feed.last_attempt_at.is_(None),
+                Feed.last_attempt_at < probe_cutoff,
+            ),
+        ),
+    )
+    claim_ids_stmt = (
+        select(Feed.id)
+        .where(claim_predicate)
         .order_by(Feed.next_fetch_at)
         .limit(claim_batch_size)
         .with_for_update(skip_locked=True)
     )
-    feeds = list((await session.execute(stmt)).scalars().all())
-    if not feeds:
-        return []
     lease_until = now + timedelta(seconds=claim_ttl_seconds)
-    for f in feeds:
-        f.next_fetch_at = lease_until
-        f.last_attempt_at = now
-    return [f.id for f in feeds]
+    update_stmt = (
+        update(Feed)
+        .where(Feed.id.in_(claim_ids_stmt))
+        .values(next_fetch_at=lease_until, last_attempt_at=now)
+        .returning(Feed.id)
+    )
+    claimed_ids = list((await session.execute(update_stmt)).scalars().all())
+    return claimed_ids
 
 
 async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
