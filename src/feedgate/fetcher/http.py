@@ -40,6 +40,7 @@ from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
 from feedgate.lifecycle import ErrorCode, FeedStatus
 from feedgate.models import Entry, Feed
+from feedgate.ssrf import BlockedURLError, validate_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,8 @@ def _parse_retry_after(header: str | None, *, now: datetime) -> int | None:
 
 def _classify_error(exc: BaseException) -> ErrorCode:
     """Map a fetch exception to a short error code."""
+    if isinstance(exc, BlockedURLError):
+        return ErrorCode.BLOCKED
     if isinstance(exc, NotAFeedError):
         return ErrorCode.NOT_A_FEED
     if isinstance(exc, ResponseTooLargeError):
@@ -208,6 +211,12 @@ async def fetch_one(
     feed.last_attempt_at = now
 
     try:
+        # Pre-flight SSRF check on the feed's effective URL. This catches
+        # late-binding DNS rebinding (a hostname that was public when
+        # registered but now resolves to ``10.x``) before any socket is
+        # opened. The HTTP transport runs the same check on every
+        # redirect hop, so a 302 → private IP is also blocked.
+        await validate_public_url(feed.effective_url)
         async with http_client.stream(
             "GET",
             feed.effective_url,

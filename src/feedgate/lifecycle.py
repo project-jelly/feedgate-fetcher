@@ -40,5 +40,7 @@ class ErrorCode(StrEnum):
     PARSE_ERROR = "parse_error"
     REDIRECT_LOOP = "redirect_loop"
     TOO_LARGE = "too_large"
+    # SSRF guard rejected the URL (private IP, bad scheme, etc.)
+    BLOCKED = "blocked"
     # Fallback
     OTHER = "other"
