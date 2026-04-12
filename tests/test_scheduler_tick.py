@@ -552,3 +552,82 @@ async def test_claim_due_feeds_advances_lease(
         feed = (await session.execute(select(Feed).where(Feed.url == feed_url))).scalar_one()
     assert feed.next_fetch_at == now + timedelta(seconds=claim_ttl)
     assert feed.last_attempt_at == now
+
+
+# ---- graceful shutdown drain ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scheduler_run_exits_cleanly_when_stop_event_is_set(
+    fetch_app: FastAPI,
+) -> None:
+    """The background loop must respect ``stop_event`` and return
+    cleanly without raising. Without this, lifespan shutdown can only
+    rely on ``task.cancel()``, which interrupts in-flight fetches and
+    leaves SKIP LOCKED claims dangling until the lease TTL elapses."""
+    fetch_app.state.fetch_interval_seconds = 0.05
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler.run(fetch_app, stop_event=stop))
+
+    # Let the loop spin a couple of (no-op) ticks so we know it is
+    # really running, then signal stop.
+    await asyncio.sleep(0.15)
+    stop.set()
+
+    await asyncio.wait_for(task, timeout=2.0)
+    assert task.done()
+    assert not task.cancelled()
+    assert task.exception() is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_run_drains_in_flight_fetch_before_exit(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """If shutdown is signaled *while* a fetch is in flight, the
+    drain path must let that fetch finish — the side-effect mock
+    sets the stop event mid-call and we then assert the feed has
+    ``last_successful_fetch_at`` populated. A naive cancel-on-stop
+    implementation would interrupt fetch_one and leave the feed in
+    its claimed-but-unreached state, failing this assertion."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    fetch_app.state.fetch_interval_seconds = 0.05
+    feed_url = "http://t.test/drain/feed"
+    now = datetime.now(UTC) - timedelta(seconds=5)
+    async with sf() as session:
+        session.add(Feed(url=feed_url, effective_url=feed_url, next_fetch_at=now))
+        await session.commit()
+
+    stop = asyncio.Event()
+
+    async def stop_then_succeed(request: Request) -> Response:
+        # Signal shutdown WHILE the fetch is in flight. The current
+        # tick must still complete before the loop exits.
+        stop.set()
+        return Response(
+            200,
+            content=_atom_with(feed_url + "/post-1", "drained"),
+            headers={"Content-Type": "application/atom+xml"},
+        )
+
+    respx_mock.get(feed_url).mock(side_effect=stop_then_succeed)
+
+    task = asyncio.create_task(scheduler.run(fetch_app, stop_event=stop))
+    await asyncio.wait_for(task, timeout=3.0)
+    assert task.exception() is None
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.url == feed_url))).scalar_one()
+        entry_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(Entry).where(Entry.feed_id == feed.id)
+                )
+            ).scalar_one()
+        )
+    assert feed.last_successful_fetch_at is not None, (
+        "in-flight fetch was interrupted by shutdown — drain path is broken"
+    )
+    assert feed.last_error_code is None
+    assert entry_count == 1
