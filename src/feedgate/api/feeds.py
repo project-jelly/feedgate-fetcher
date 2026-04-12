@@ -20,6 +20,7 @@ from feedgate.api import get_session
 from feedgate.lifecycle import FeedStatus
 from feedgate.models import Feed
 from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
+from feedgate.ssrf import BlockedURLError, validate_public_url
 from feedgate.urlnorm import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,17 @@ async def create_feed(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
     url = normalize_url(payload.url)
+
+    # SSRF guard: cheap check (scheme + IP literal). Hostname-resolution
+    # check happens at fetch time so a flaky resolver cannot drop a
+    # legitimate registration. ``http://10.0.0.1/feed`` is rejected here.
+    try:
+        await validate_public_url(url, resolve=False)
+    except BlockedURLError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"blocked_url: {exc}",
+        ) from exc
 
     # Idempotent: if already registered, return existing row with 200.
     existing = (await session.execute(select(Feed).where(Feed.url == url))).scalar_one_or_none()

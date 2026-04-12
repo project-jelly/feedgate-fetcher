@@ -28,6 +28,7 @@ from feedgate.api import register_routers
 from feedgate.config import get_settings
 from feedgate.db import make_engine, make_session_factory
 from feedgate.fetcher import scheduler
+from feedgate.ssrf import SSRFGuardTransport
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,14 @@ def create_app() -> FastAPI:
     settings = get_settings()
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
+    # Wrap the default transport with the SSRF guard so that *every*
+    # outbound request — including any redirect httpx follows on its
+    # own — re-validates the destination URL. Pre-validation in
+    # fetch_one only catches the initial host; the transport guard is
+    # what keeps a 302 to ``http://169.254.169.254/`` from leaking out.
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(settings.fetch_timeout_seconds),
+        transport=SSRFGuardTransport(httpx.AsyncHTTPTransport()),
     )
 
     @asynccontextmanager
