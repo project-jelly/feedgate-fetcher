@@ -346,8 +346,14 @@ def _make_barrier_recorder() -> tuple[
         state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
         if state["in_flight"] >= 2:
             both_in_flight.set()
+        # Wait long enough that a slow CI runner reliably lets the
+        # second coroutine walk through _process_feed (DB query, host
+        # sem, validate_public_url, respx dispatch) and reach the
+        # recorder while the first is still holding. 0.1s was too
+        # tight — the first caller timed out alone and the event
+        # never fired in the parallel-hosts test.
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(both_in_flight.wait(), timeout=0.1)
+            await asyncio.wait_for(both_in_flight.wait(), timeout=1.0)
         state["in_flight"] -= 1
         guid = str(request.url) + "/post-1"
         return Response(
