@@ -206,10 +206,7 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
     host_sems: dict[str, asyncio.Semaphore] = {}
     per_host_concurrency = app.state.fetch_per_host_concurrency
     await asyncio.gather(
-        *(
-            _process_feed(fid, app, sem, host_sems, per_host_concurrency, now)
-            for fid in feed_ids
-        )
+        *(_process_feed(fid, app, sem, host_sems, per_host_concurrency, now) for fid in feed_ids)
     )
 
 
