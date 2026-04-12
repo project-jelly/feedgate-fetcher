@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
     fetch_concurrency: int = 4
+    # Per-host concurrency cap. The global ``fetch_concurrency`` bounds
+    # how many feeds we fetch simultaneously across the whole tick;
+    # this knob bounds how many of those can target the **same** host.
+    # Default 1 means same-host requests are fully serialized within a
+    # tick — important when one origin hosts dozens of our feeds (e.g.
+    # all the GitHub release feeds), so we never look like a DDoS to
+    # any single upstream. The cap is per-tick (the dict is rebuilt
+    # every tick_once); cross-tick spacing is handled by the existing
+    # ``next_fetch_at`` schedule.
+    fetch_per_host_concurrency: int = 1
     # Distributed-claim tuning for the scheduler's SKIP LOCKED loop.
     # A tick atomically reserves up to `fetch_claim_batch_size` feeds
     # by advancing their `next_fetch_at` to `now + claim_ttl_seconds`

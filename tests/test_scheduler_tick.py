@@ -7,12 +7,14 @@ and verifies every feed got fetched and its entries stored.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import respx
 from fastapi import FastAPI
-from httpx import Response
+from httpx import Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -293,6 +295,133 @@ async def test_tick_once_skips_recently_probed_dead_feed(
     assert still_dead.status == "dead"
     assert still_dead.last_attempt_at == fresh_attempt  # untouched
     assert still_dead.last_error_code == "http_410"
+
+
+async def _seed_due_feeds(
+    sf: async_sessionmaker[AsyncSession],
+    urls: list[str],
+    now: datetime,
+) -> None:
+    async with sf() as session:
+        for u in urls:
+            session.add(
+                Feed(
+                    url=u,
+                    effective_url=u,
+                    next_fetch_at=now - timedelta(seconds=5),
+                )
+            )
+        await session.commit()
+
+
+def _make_barrier_recorder() -> tuple[
+    dict[str, int],
+    asyncio.Event,
+    Callable[[Request], Awaitable[Response]],
+]:
+    """Build a respx side-effect that tracks how many calls are
+    simultaneously in flight via a counter, AND signals an
+    ``asyncio.Event`` the moment two callers overlap.
+
+    Each call increments ``in_flight``, records the running max,
+    sets the event when two callers are inside the side-effect at
+    the same time, then waits for the event with a small timeout
+    before returning. This makes the parallel-vs-serialized assertion
+    deterministic regardless of CI scheduling jitter:
+
+      * If the per-host throttle lets both callers in, the second
+        call sets the event and both return immediately — observed
+        ``max_in_flight == 2``, event ``is_set``.
+      * If the throttle serializes them, only one is ever inside the
+        side-effect, the event never fires, and the wait_for inside
+        the recorder times out — observed ``max_in_flight == 1``,
+        event NOT set. The 0.1s ceiling per call keeps the test
+        well under one second total.
+    """
+    state: dict[str, int] = {"in_flight": 0, "max_in_flight": 0}
+    both_in_flight = asyncio.Event()
+
+    async def recorder(request: Request) -> Response:
+        state["in_flight"] += 1
+        state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+        if state["in_flight"] >= 2:
+            both_in_flight.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(both_in_flight.wait(), timeout=0.1)
+        state["in_flight"] -= 1
+        guid = str(request.url) + "/post-1"
+        return Response(
+            200,
+            content=_atom_with(guid, "throttle"),
+            headers={"Content-Type": "application/atom+xml"},
+        )
+
+    return state, both_in_flight, recorder
+
+
+@pytest.mark.asyncio
+async def test_per_host_throttle_serializes_same_host_feeds(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Two feeds on the same host must NEVER overlap inside the HTTP
+    side-effect. The barrier event the recorder uses is wired so that
+    a second concurrent caller would *immediately* set it; if the
+    per-host semaphore is doing its job, the second caller is blocked
+    in scheduler land and never reaches the side-effect, so the event
+    stays clear and ``max_in_flight`` stays at 1."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    url_a = "http://same.test/a/feed"
+    url_b = "http://same.test/b/feed"
+
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    await _seed_due_feeds(sf, [url_a, url_b], now)
+
+    state, both_in_flight, recorder = _make_barrier_recorder()
+    respx_mock.get(url_a).mock(side_effect=recorder)
+    respx_mock.get(url_b).mock(side_effect=recorder)
+
+    await scheduler.tick_once(fetch_app, now=now)
+
+    assert state["max_in_flight"] == 1, (
+        f"per-host throttle leaked: max_in_flight={state['max_in_flight']}"
+    )
+    assert not both_in_flight.is_set(), (
+        "barrier event fired — two callers were inside the side-effect simultaneously"
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_host_throttle_allows_distinct_hosts_in_parallel(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """The per-host cap must NOT serialize feeds on *different* hosts.
+    Cross-host parallelism is the property the global ``fetch_concurrency``
+    knob exists to provide; if this regresses, throughput collapses to
+    one feed at a time on a healthy multi-origin batch.
+
+    The barrier event makes the assertion deterministic: as soon as
+    a second caller enters the side-effect, the event fires and both
+    return. If the loop happens to enter them in strict series, the
+    event never fires and the test fails loudly."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    url_a = "http://host-a.test/feed"
+    url_b = "http://host-b.test/feed"
+
+    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+    await _seed_due_feeds(sf, [url_a, url_b], now)
+
+    state, both_in_flight, recorder = _make_barrier_recorder()
+    respx_mock.get(url_a).mock(side_effect=recorder)
+    respx_mock.get(url_b).mock(side_effect=recorder)
+
+    await scheduler.tick_once(fetch_app, now=now)
+
+    assert both_in_flight.is_set(), "barrier event never fired — distinct hosts were serialized"
+    assert state["max_in_flight"] == 2, (
+        f"distinct hosts wrongly serialized: max_in_flight={state['max_in_flight']}"
+    )
 
 
 @pytest.mark.asyncio
