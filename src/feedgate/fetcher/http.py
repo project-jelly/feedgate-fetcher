@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
@@ -266,17 +266,15 @@ async def fetch_one(
         parsed = await parse_feed(body)
         entries_to_upsert = parsed.entries
         if entries_to_upsert:
-            existing_count = (
-                await session.execute(
-                    select(func.count()).select_from(Entry).where(Entry.feed_id == feed.id)
-                )
+            has_existing_entries = (
+                await session.execute(select(exists().where(Entry.feed_id == feed.id)))
             ).scalar_one()
             # Initial-fetch cap: a brand-new feed that advertises hundreds
             # of entries (OpenAI emits ~909, Hugging Face ~762) gets
             # truncated to the top N most-recent, matching what Feedly
             # does in production. Subsequent fetches ignore the cap —
             # the delta is almost always small and ON CONFLICT dedups.
-            if existing_count == 0 and len(entries_to_upsert) > max_entries_initial:
+            if not has_existing_entries and len(entries_to_upsert) > max_entries_initial:
                 entries_to_upsert = entries_to_upsert[:max_entries_initial]
             await upsert_entries(session, feed.id, entries_to_upsert, now=now)
 
