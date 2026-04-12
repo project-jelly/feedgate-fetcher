@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/feedgate"
+    # Base pool for scheduler(4) + API headroom + retention worker.
+    db_pool_size: int = 8
+    # Temporary burst capacity when base pool is fully claimed.
+    db_max_overflow: int = 4
+    # Seconds to wait for a DB connection before raising timeout.
+    db_pool_timeout: int = 30
+    # Recycle idle-ish connections periodically to avoid stale sockets.
+    db_pool_recycle: int = 1800
     fetch_interval_seconds: int = 60
     # Per-phase HTTP timeouts (httpx.Timeout). Splitting these is the
     # primary defense against slow-loris-style upstreams that drip-feed
