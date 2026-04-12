@@ -18,7 +18,7 @@ import json
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +27,6 @@ from feedgate.models import Entry
 from feedgate.schemas import EntryResponse, PaginatedEntries
 
 router = APIRouter(prefix="/v1/entries", tags=["entries"])
-
-MAX_FEED_IDS = 200
-MAX_LIMIT = 200
-DEFAULT_LIMIT = 50
 
 
 def _encode_cursor(published_at: datetime | None, entry_id: int) -> str:
@@ -59,11 +55,22 @@ def _decode_cursor(cursor: str) -> tuple[datetime | None, int]:
 
 @router.get("", response_model=PaginatedEntries)
 async def list_entries(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     feed_ids: Annotated[str, Query(..., description="comma-separated feed ids")],
     cursor: Annotated[str | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+    limit: Annotated[int | None, Query(ge=1)] = None,
 ) -> PaginatedEntries:
+    max_feed_ids = request.app.state.api_entries_max_feed_ids
+    default_limit = request.app.state.api_entries_default_limit
+    max_limit = request.app.state.api_entries_max_limit
+    limit_value = default_limit if limit is None else limit
+    if limit_value > max_limit:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"limit must be less than or equal to {max_limit}",
+        )
+
     try:
         feed_id_list = [int(x) for x in feed_ids.split(",") if x]
     except ValueError as exc:
@@ -77,10 +84,10 @@ async def list_entries(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="feed_ids is required",
         )
-    if len(feed_id_list) > MAX_FEED_IDS:
+    if len(feed_id_list) > max_feed_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"feed_ids length exceeds {MAX_FEED_IDS}",
+            detail=f"feed_ids length exceeds {max_feed_ids}",
         )
 
     stmt = select(Entry).where(Entry.feed_id.in_(feed_id_list))
@@ -99,11 +106,11 @@ async def list_entries(
                 )
             )
 
-    stmt = stmt.order_by(Entry.published_at.desc(), Entry.id.desc()).limit(limit + 1)
+    stmt = stmt.order_by(Entry.published_at.desc(), Entry.id.desc()).limit(limit_value + 1)
 
     rows = (await session.execute(stmt)).scalars().all()
-    has_more = len(rows) > limit
-    items = list(rows[:limit])
+    has_more = len(rows) > limit_value
+    items = list(rows[:limit_value])
 
     next_cursor: str | None = None
     if has_more and items:
