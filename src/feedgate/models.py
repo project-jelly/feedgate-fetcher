@@ -128,3 +128,12 @@ Index(
     Entry.published_at.desc(),
     Entry.id.desc(),
 )
+
+# Matches retention.sweep window sort key:
+# row_number() OVER (PARTITION BY feed_id ORDER BY fetched_at DESC, id DESC).
+Index(
+    "ix_entries_feed_fetched_id",
+    Entry.feed_id,
+    Entry.fetched_at.desc(),
+    Entry.id.desc(),
+)
