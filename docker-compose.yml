@@ -1,3 +1,31 @@
+# feedgate-fetcher local stack
+#
+# 4 services share one image (built once) and one Postgres:
+#
+#   postgres   single instance, named volume for persistence
+#   migrate    one-shot Alembic upgrade, runs to completion then exits
+#   api        FastAPI server (FEEDGATE_SCHEDULER_ENABLED=false,
+#              FEEDGATE_RETENTION_ENABLED=true) — handles HTTP requests
+#              and runs the retention sweeper
+#   worker     scheduler-only role (FEEDGATE_SCHEDULER_ENABLED=true,
+#              FEEDGATE_RETENTION_ENABLED=false) — scalable via
+#              `docker compose up -d --scale worker=N worker`
+#
+# The host port mapping for `postgres` (55432:5432) is preserved so
+# any host process (e.g. a developer-run uvicorn) can still connect
+# at `localhost:55432`. The compose-managed services connect through
+# the Docker network at `postgres:5432`. The host uvicorn and the
+# compose worker can run **simultaneously** against the same DB —
+# SKIP LOCKED keeps them from double-claiming feeds.
+#
+# Quick start:
+#   docker compose build
+#   docker compose up -d postgres
+#   docker compose run --rm migrate
+#   docker compose up -d api
+#   docker compose up -d --scale worker=3 worker
+#   docker compose ps
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -13,3 +41,51 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  migrate:
+    image: feedgate-fetcher:latest
+    build: .
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      FEEDGATE_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/feedgate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: feedgate-fetcher:latest
+    environment:
+      FEEDGATE_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/feedgate
+      FEEDGATE_SCHEDULER_ENABLED: "false"
+      FEEDGATE_RETENTION_ENABLED: "true"
+    ports:
+      # 8766 on host → 8000 in container.
+      # 8765 is intentionally left for a host-run uvicorn so the two
+      # can coexist during the migration period. Drop the host
+      # uvicorn first if you want to free 8765.
+      - "8766:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    image: feedgate-fetcher:latest
+    environment:
+      FEEDGATE_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/feedgate
+      FEEDGATE_SCHEDULER_ENABLED: "true"
+      FEEDGATE_RETENTION_ENABLED: "false"
+    # No host port mapping — workers do not serve external HTTP.
+    # They still run uvicorn internally, but only because the
+    # lifespan is what starts scheduler.run() as an asyncio task.
+    # Scale with: `docker compose up -d --scale worker=N worker`
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pg-data:
