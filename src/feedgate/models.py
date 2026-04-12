@@ -57,8 +57,8 @@ class Feed(Base):
     next_fetch_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    etag: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_modified: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Dropped in migration 0004; no code path reads/writes these yet.
+    # Reintroduced in the dedicated ETag/If-Modified-Since feature PR.
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     entries: Mapped[list[Entry]] = relationship(
