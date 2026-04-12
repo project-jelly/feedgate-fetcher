@@ -18,9 +18,24 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-def make_engine(database_url: str) -> AsyncEngine:
+def make_engine(
+    database_url: str,
+    *,
+    pool_size: int = 8,
+    max_overflow: int = 4,
+    pool_timeout: int = 30,
+    pool_recycle: int = 1800,
+) -> AsyncEngine:
     """Create an async engine. URL must use the asyncpg driver."""
-    return create_async_engine(database_url, future=True, echo=False)
+    return create_async_engine(
+        database_url,
+        future=True,
+        echo=False,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+    )
 
 
 def make_session_factory(

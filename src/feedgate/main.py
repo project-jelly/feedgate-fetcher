@@ -81,7 +81,13 @@ def create_app() -> FastAPI:
     when enabled and (b) cleaning up resources at shutdown.
     """
     settings = get_settings()
-    engine = make_engine(settings.database_url)
+    engine = make_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+        pool_recycle=settings.db_pool_recycle,
+    )
     session_factory = make_session_factory(engine)
     # Wrap the default transport with the SSRF guard so that *every*
     # outbound request — including any redirect httpx follows on its
