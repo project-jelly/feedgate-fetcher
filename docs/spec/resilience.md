@@ -4,6 +4,7 @@
 - 마지막 업데이트: 2026-04-12
 - 관련 ADR: 000, 001, 002, 003
 - 관련 spec: [`feed.md`](feed.md), [`entry.md`](entry.md)
+- 관련 tests: [`../tests/resilience-test-cases.md`](../tests/resilience-test-cases.md) — 모든 위협 ID에 대한 TC 매핑 카탈로그
 
 이 문서는 feedgate-fetcher가 **악의적/병적 입력, upstream 장애, 인프라 사고**에
 직면했을 때 어떤 방어선을 어떤 순서로 작동시키는지 — 그리고 그 결과가
