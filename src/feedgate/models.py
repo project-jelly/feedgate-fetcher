@@ -71,9 +71,16 @@ class Feed(Base):
     __table_args__ = (
         Index("ix_feeds_status", "status"),
         Index(
-            "ix_feeds_next_fetch_at_active",
+            "ix_feeds_due_not_dead",
             "next_fetch_at",
-            postgresql_where="status = 'active'",
+            # Covers due path: status != 'dead' AND next_fetch_at <= now.
+            postgresql_where="status <> 'dead'",
+        ),
+        Index(
+            "ix_feeds_dead_last_attempt",
+            "last_attempt_at",
+            # Covers dead-probe path: status = 'dead' AND last_attempt_at ...
+            postgresql_where="status = 'dead'",
         ),
     )
 
