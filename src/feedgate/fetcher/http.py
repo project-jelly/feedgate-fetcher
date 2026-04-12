@@ -318,9 +318,7 @@ async def fetch_one(
             # transition straight through to dead in the same call)
             if feed.status == FeedStatus.BROKEN:
                 reference = feed.last_successful_fetch_at or feed.created_at
-                if reference is not None and (
-                    now - reference >= timedelta(days=dead_duration_days)
-                ):
+                if now - reference >= timedelta(days=dead_duration_days):
                     _log_transition(
                         feed,
                         FeedStatus.DEAD,
