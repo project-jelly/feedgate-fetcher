@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -97,11 +98,11 @@ async def test_validate_skips_dns_when_resolve_false() -> None:
         raise AssertionError(f"_resolve was called for {host}")
 
     original = ssrf._resolve
-    ssrf._resolve = explode  # type: ignore[assignment]
+    ssrf._resolve = explode
     try:
         await validate_public_url("http://example.com/feed", resolve=False)
     finally:
-        ssrf._resolve = original  # type: ignore[assignment]
+        ssrf._resolve = original
 
 
 @pytest.mark.asyncio
@@ -166,7 +167,7 @@ async def test_validate_allows_unresolvable_host(
 # ---------------------------------------------------------------------------
 
 
-class _SpyTransport:
+class _SpyTransport(httpx.AsyncBaseTransport):
     def __init__(self) -> None:
         self.calls: list[str] = []
 
@@ -291,7 +292,7 @@ async def test_post_feed_blocked_url_does_not_create_row(
 
 @pytest.mark.asyncio
 async def test_fetch_one_marks_blocked_when_host_resolves_to_private_ip(
-    fetch_app,
+    fetch_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end: a feed registered with a benign hostname whose DNS
