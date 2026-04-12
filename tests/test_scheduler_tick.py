@@ -311,11 +311,17 @@ async def test_claim_due_feeds_skip_locked_prevents_double_claim(
     sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
     feed_url = "http://t.test/skip-locked-race/feed"
 
-    async with sf() as session:
-        session.add(Feed(url=feed_url, effective_url=feed_url))
-        await session.commit()
-
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+
+    async with sf() as session:
+        session.add(
+            Feed(
+                url=feed_url,
+                effective_url=feed_url,
+                next_fetch_at=now - timedelta(seconds=5),
+            )
+        )
+        await session.commit()
 
     # Barrier: worker A acquires the row lock, THEN signals worker B
     # to attempt its own claim. B runs while A's transaction is still
@@ -374,12 +380,18 @@ async def test_claim_due_feeds_advances_lease(
     sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
     feed_url = "http://t.test/lease-advance/feed"
 
-    async with sf() as session:
-        session.add(Feed(url=feed_url, effective_url=feed_url))
-        await session.commit()
-
     now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
     claim_ttl = 180
+
+    async with sf() as session:
+        session.add(
+            Feed(
+                url=feed_url,
+                effective_url=feed_url,
+                next_fetch_at=now - timedelta(seconds=5),
+            )
+        )
+        await session.commit()
 
     async with sf() as session:
         first = await _claim_due_feeds(
