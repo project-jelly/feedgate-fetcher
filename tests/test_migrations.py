@@ -34,7 +34,11 @@ async def test_required_indexes_exist(async_engine: AsyncEngine) -> None:
         )
         indexes = {row[0] for row in result}
     assert "ix_feeds_status" in indexes
-    assert "ix_feeds_next_fetch_at_active" in indexes
+    # Migration 0002 replaced the active-only partial with two
+    # partials that match the real _claim_due_feeds predicates.
+    assert "ix_feeds_due_not_dead" in indexes
+    assert "ix_feeds_dead_last_attempt" in indexes
+    assert "ix_feeds_next_fetch_at_active" not in indexes
     assert "ix_entries_fetched_at" in indexes
     assert "ix_entries_feed_pub_id" in indexes
 
