@@ -15,7 +15,24 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/feedgate"
     fetch_interval_seconds: int = 60
-    fetch_timeout_seconds: float = 20.0
+    # Per-phase HTTP timeouts (httpx.Timeout). Splitting these is the
+    # primary defense against slow-loris-style upstreams that drip-feed
+    # bytes just slowly enough to keep a worker tied up. ``read`` is
+    # the load-bearing one (per-chunk inactivity) and is intentionally
+    # tighter than the historical 20s blanket. ``connect`` is short
+    # because TCP handshake should never take 20s on a healthy host.
+    fetch_connect_timeout_seconds: float = 5.0
+    fetch_read_timeout_seconds: float = 15.0
+    fetch_write_timeout_seconds: float = 10.0
+    fetch_pool_timeout_seconds: float = 5.0
+    # Hard total wall-clock budget for one ``fetch_one`` call,
+    # enforced via ``asyncio.timeout``. Even if every individual chunk
+    # arrives within ``read``, an upstream that streams a 200-byte
+    # body across many small chunks can still pin a worker; this
+    # bound caps the total time and reclassifies the failure as
+    # ``ErrorCode.TIMEOUT``. Set comfortably above the sum of the
+    # per-phase timeouts so it only fires on pathological cases.
+    fetch_total_budget_seconds: float = 30.0
     fetch_max_bytes: int = 5 * 1024 * 1024
     fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50

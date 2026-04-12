@@ -27,6 +27,7 @@ On failure:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from datetime import UTC, datetime, timedelta
@@ -177,7 +178,7 @@ def _classify_error(exc: BaseException) -> ErrorCode:
         return ErrorCode.NOT_A_FEED
     if isinstance(exc, ResponseTooLargeError):
         return ErrorCode.TOO_LARGE
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, httpx.TimeoutException | TimeoutError):
         return ErrorCode.TIMEOUT
     if isinstance(exc, httpx.ConnectError):
         return ErrorCode.CONNECTION
@@ -203,6 +204,7 @@ async def fetch_one(
     user_agent: str,
     max_bytes: int,
     max_entries_initial: int,
+    total_budget_seconds: float,
     broken_threshold: int,
     dead_duration_days: int,
     broken_max_backoff_seconds: int,
@@ -217,12 +219,20 @@ async def fetch_one(
         # opened. The HTTP transport runs the same check on every
         # redirect hop, so a 302 → private IP is also blocked.
         await validate_public_url(feed.effective_url)
-        async with http_client.stream(
-            "GET",
-            feed.effective_url,
-            headers={"User-Agent": user_agent},
-            follow_redirects=True,
-        ) as response:
+        # Hard total wall-clock budget for the entire fetch — guards
+        # against slow-loris streams that drip bytes just under the
+        # per-chunk read timeout. ``asyncio.timeout`` raises
+        # ``TimeoutError`` which ``_classify_error`` maps to
+        # ``ErrorCode.TIMEOUT``.
+        async with (
+            asyncio.timeout(total_budget_seconds),
+            http_client.stream(
+                "GET",
+                feed.effective_url,
+                headers={"User-Agent": user_agent},
+                follow_redirects=True,
+            ) as response,
+        ):
             # 429 Rate Limited is NOT a circuit-breaker failure
             # (spec/feed.md). Honor Retry-After, record the code,
             # leave consecutive_failures and status alone, and bail

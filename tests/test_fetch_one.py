@@ -28,6 +28,7 @@ _TEST_SETTINGS = Settings()
 _FETCH_DEFAULTS: dict[str, Any] = {
     "max_bytes": _TEST_SETTINGS.fetch_max_bytes,
     "max_entries_initial": _TEST_SETTINGS.fetch_max_entries_initial,
+    "total_budget_seconds": _TEST_SETTINGS.fetch_total_budget_seconds,
     "broken_threshold": _TEST_SETTINGS.broken_threshold,
     "dead_duration_days": _TEST_SETTINGS.dead_duration_days,
     "broken_max_backoff_seconds": _TEST_SETTINGS.broken_max_backoff_seconds,
@@ -874,6 +875,55 @@ async def test_fetch_one_429_honors_retry_after_http_date(
     delta = (state["next_fetch_at"] - now).total_seconds()
     assert delta == 300
     assert state["last_error_code"] == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_total_budget_kills_slow_response(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A respx side-effect that sleeps longer than ``total_budget_seconds``
+    must trigger ``asyncio.timeout`` inside fetch_one. The feed is
+    marked with ``last_error_code = 'timeout'`` and ``consecutive_failures``
+    is bumped — that is the load-bearing slow-loris defense.
+    """
+    import asyncio as _asyncio  # local alias to avoid clashing with re-exports
+
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/slow-loris/feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    async def slow_response(request: Any) -> Response:
+        # Sleep is several times the budget — guarantees the timeout
+        # fires before the body is delivered.
+        await _asyncio.sleep(0.5)
+        return Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+
+    respx_mock.get(feed_url).mock(side_effect=slow_response)
+
+    now = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(total_budget_seconds=0.05),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == "timeout"
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 1
 
 
 def test_parse_retry_after_none_returns_none() -> None:
