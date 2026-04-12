@@ -33,6 +33,44 @@ from feedgate.ssrf import SSRFGuardTransport
 logger = logging.getLogger(__name__)
 
 
+async def _drain_background_task(
+    task: asyncio.Task[None] | None,
+    stop_event: asyncio.Event,
+    *,
+    name: str,
+    drain_seconds: float,
+) -> None:
+    """Cooperatively drain a background loop on lifespan shutdown.
+
+    Sets ``stop_event``, waits up to ``drain_seconds`` for the task to
+    finish its current iteration and exit cleanly, and force-cancels
+    if the budget runs out. Force-cancel is the *fallback* path — it
+    leaves any in-flight ``fetch_one`` claims dangling until the SKIP
+    LOCKED lease TTL elapses, so the budget should be sized to avoid
+    hitting it on healthy shutdowns.
+
+    Extracted from the lifespan body specifically so unit tests can
+    exercise the timeout/force-cancel branch without spinning up a
+    full FastAPI app.
+    """
+    if task is None:
+        return
+    stop_event.set()
+    try:
+        await asyncio.wait_for(task, timeout=drain_seconds)
+    except TimeoutError:
+        logger.warning(
+            "%s task did not drain within %.1fs; force-cancelling",
+            name,
+            drain_seconds,
+        )
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    except Exception:
+        logger.exception("%s task raised during drain", name)
+
+
 def create_app() -> FastAPI:
     """Build a wired-up FastAPI app.
 
@@ -87,33 +125,20 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            # Graceful drain: signal each background task to stop and
-            # give it ``shutdown_drain_seconds`` to finish its current
-            # iteration. Tasks that overrun get force-cancelled — that
-            # path leaves feeds in claimed-but-not-committed state and
-            # relies on the SKIP LOCKED lease TTL to release them, so
-            # the drain budget should always be the preferred exit.
+            # Graceful drain: see ``_drain_background_task`` docstring.
             drain_budget = settings.shutdown_drain_seconds
-            for task, stop, name in (
-                (scheduler_task, scheduler_stop, "scheduler"),
-                (retention_task, retention_stop, "retention"),
-            ):
-                if task is None:
-                    continue
-                stop.set()
-                try:
-                    await asyncio.wait_for(task, timeout=drain_budget)
-                except TimeoutError:
-                    logger.warning(
-                        "%s task did not drain within %.1fs; force-cancelling",
-                        name,
-                        drain_budget,
-                    )
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await task
-                except Exception:
-                    logger.exception("%s task raised during drain", name)
+            await _drain_background_task(
+                scheduler_task,
+                scheduler_stop,
+                name="scheduler",
+                drain_seconds=drain_budget,
+            )
+            await _drain_background_task(
+                retention_task,
+                retention_stop,
+                name="retention",
+                drain_seconds=drain_budget,
+            )
             await http_client.aclose()
             await engine.dispose()
 
