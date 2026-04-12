@@ -64,8 +64,10 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scheduler_task: asyncio.Task[None] | None = None
         retention_task: asyncio.Task[None] | None = None
+        scheduler_stop = asyncio.Event()
+        retention_stop = asyncio.Event()
         if settings.scheduler_enabled:
-            scheduler_task = asyncio.create_task(scheduler.run(app))
+            scheduler_task = asyncio.create_task(scheduler.run(app, stop_event=scheduler_stop))
             logger.info(
                 "scheduler started, interval=%ss",
                 settings.fetch_interval_seconds,
@@ -73,7 +75,7 @@ def create_app() -> FastAPI:
         else:
             logger.info("scheduler disabled via FEEDGATE_SCHEDULER_ENABLED=false")
         if settings.retention_enabled:
-            retention_task = asyncio.create_task(retention.run(app))
+            retention_task = asyncio.create_task(retention.run(app, stop_event=retention_stop))
             logger.info(
                 "retention sweeper started, interval=%ss days=%s min_per_feed=%s",
                 settings.retention_sweep_interval_seconds,
@@ -85,11 +87,33 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            for task in (scheduler_task, retention_task):
-                if task is not None:
+            # Graceful drain: signal each background task to stop and
+            # give it ``shutdown_drain_seconds`` to finish its current
+            # iteration. Tasks that overrun get force-cancelled — that
+            # path leaves feeds in claimed-but-not-committed state and
+            # relies on the SKIP LOCKED lease TTL to release them, so
+            # the drain budget should always be the preferred exit.
+            drain_budget = settings.shutdown_drain_seconds
+            for task, stop, name in (
+                (scheduler_task, scheduler_stop, "scheduler"),
+                (retention_task, retention_stop, "retention"),
+            ):
+                if task is None:
+                    continue
+                stop.set()
+                try:
+                    await asyncio.wait_for(task, timeout=drain_budget)
+                except TimeoutError:
+                    logger.warning(
+                        "%s task did not drain within %.1fs; force-cancelling",
+                        name,
+                        drain_budget,
+                    )
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
+                except Exception:
+                    logger.exception("%s task raised during drain", name)
             await http_client.aclose()
             await engine.dispose()
 
@@ -103,6 +127,7 @@ def create_app() -> FastAPI:
     app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
     app.state.fetch_concurrency = settings.fetch_concurrency
     app.state.fetch_per_host_concurrency = settings.fetch_per_host_concurrency
+    app.state.shutdown_drain_seconds = settings.shutdown_drain_seconds
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
     app.state.retention_days = settings.retention_days

@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # every tick_once); cross-tick spacing is handled by the existing
     # ``next_fetch_at`` schedule.
     fetch_per_host_concurrency: int = 1
+    # On shutdown, the lifespan signals the background tasks via a
+    # stop ``asyncio.Event`` and gives each one this many seconds to
+    # finish its current iteration cleanly. Tasks that overrun the
+    # budget are force-cancelled. Set comfortably above the worst-
+    # case full tick (claim batch * per-feed ceiling) — a tick that
+    # actually finishes its work avoids leaving feeds half-claimed
+    # waiting for the SKIP LOCKED lease TTL to expire.
+    shutdown_drain_seconds: float = 30.0
     # Distributed-claim tuning for the scheduler's SKIP LOCKED loop.
     # A tick atomically reserves up to `fetch_claim_batch_size` feeds
     # by advancing their `next_fetch_at` to `now + claim_ttl_seconds`
