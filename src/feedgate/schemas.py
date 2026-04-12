@@ -59,12 +59,3 @@ class EntryResponse(BaseModel):
 class PaginatedEntries(BaseModel):
     items: list[EntryResponse]
     next_cursor: str | None = None
-
-
-class ErrorBody(BaseModel):
-    code: str
-    message: str
-
-
-class ErrorResponse(BaseModel):
-    error: ErrorBody

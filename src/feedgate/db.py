@@ -7,9 +7,6 @@ FastAPI lifespan (to create at startup, dispose at shutdown), by tests
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -47,17 +44,3 @@ def make_session_factory(
         expire_on_commit=False,
         autoflush=False,
     )
-
-
-@asynccontextmanager
-async def session_scope(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> AsyncIterator[AsyncSession]:
-    """Open a session, commit on success, rollback on exception."""
-    async with session_factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
