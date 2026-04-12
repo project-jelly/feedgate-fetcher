@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     backoff_jitter_ratio: float = 0.25
     dead_probe_interval_days: int = 7
 
+    # API pagination defaults (env-overridable).
+    api_entries_max_feed_ids: int = 200
+    api_entries_default_limit: int = 50
+    api_entries_max_limit: int = 200
+    api_feeds_max_limit: int = 200
+
 
 def get_settings() -> Settings:
     return Settings()

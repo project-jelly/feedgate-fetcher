@@ -169,6 +169,10 @@ def create_app() -> FastAPI:
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
     app.state.backoff_jitter_ratio = settings.backoff_jitter_ratio
     app.state.dead_probe_interval_days = settings.dead_probe_interval_days
+    app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
+    app.state.api_entries_default_limit = settings.api_entries_default_limit
+    app.state.api_entries_max_limit = settings.api_entries_max_limit
+    app.state.api_feeds_max_limit = settings.api_feeds_max_limit
     register_routers(app)
     return app
 

@@ -120,8 +120,13 @@ async def api_app(
     wire in a lifespan + scheduler. For Phase 3 tests we just need the
     routers and the session dependency; no background task.
     """
+    settings = Settings()
     app = FastAPI()
     app.state.session_factory = async_session_factory
+    app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
+    app.state.api_entries_default_limit = settings.api_entries_default_limit
+    app.state.api_entries_max_limit = settings.api_entries_max_limit
+    app.state.api_feeds_max_limit = settings.api_feeds_max_limit
     register_routers(app)
     return app
 

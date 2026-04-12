@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,7 @@ async def create_feed(
 
 @router.get("", response_model=PaginatedFeeds)
 async def list_feeds(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: int = 50,
     status_filter: Annotated[
@@ -76,7 +77,8 @@ async def list_feeds(
         ),
     ] = None,
 ) -> PaginatedFeeds:
-    limit = max(1, min(limit, 200))
+    max_limit = request.app.state.api_feeds_max_limit
+    limit = max(1, min(limit, max_limit))
     stmt = select(Feed)
     if status_filter is not None:
         stmt = stmt.where(Feed.status == status_filter)
