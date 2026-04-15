@@ -78,6 +78,8 @@ async def _load_feed(
         row = (
             await session.execute(
                 select(
+                    Feed.url,
+                    Feed.effective_url,
                     Feed.title,
                     Feed.status,
                     Feed.last_successful_fetch_at,
@@ -89,6 +91,8 @@ async def _load_feed(
             )
         ).one()
         return {
+            "url": row.url,
+            "effective_url": row.effective_url,
             "title": row.title,
             "status": row.status,
             "last_successful_fetch_at": row.last_successful_fetch_at,
@@ -150,6 +154,87 @@ async def test_fetch_one_success_stores_entries_and_updates_timers(
     assert state["status"] == "active"
 
     assert await _count_entries_for_feed(sf, feed_id) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_301_updates_effective_url(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    old_url = "http://old.test/feed"
+    new_url = "http://new.test/feed"
+    feed_id = await _create_feed(sf, old_url)
+
+    respx_mock.get(old_url).mock(return_value=Response(301, headers={"Location": new_url}))
+    respx_mock.get(new_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    now = datetime(2026, 4, 10, 12, 30, 0, tzinfo=UTC)
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["effective_url"] == new_url
+    assert state["url"] == old_url
+    assert state["last_successful_fetch_at"] is not None
+    assert state["last_error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_302_does_not_update_effective_url(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    original_url = "http://tmp.test/feed"
+    detour_url = "http://detour.test/feed"
+    feed_id = await _create_feed(sf, original_url)
+
+    respx_mock.get(original_url).mock(return_value=Response(302, headers={"Location": detour_url}))
+    respx_mock.get(detour_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    now = datetime(2026, 4, 10, 12, 40, 0, tzinfo=UTC)
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["effective_url"] == original_url
+    assert state["url"] == original_url
+    assert state["last_successful_fetch_at"] is not None
 
 
 @pytest.mark.asyncio
