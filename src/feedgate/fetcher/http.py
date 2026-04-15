@@ -249,6 +249,11 @@ async def fetch_one(
                 return
 
             response.raise_for_status()
+            permanent_moved = any(h.status_code == 301 for h in response.history)
+            if permanent_moved:
+                final_url = str(response.url)
+                if final_url != feed.effective_url:
+                    feed.effective_url = final_url
 
             ct = response.headers.get("content-type")
             if _is_not_a_feed_content_type(ct):
