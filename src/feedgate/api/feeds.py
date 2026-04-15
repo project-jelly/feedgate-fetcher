@@ -8,6 +8,8 @@ used; see ADR 002).
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
@@ -27,6 +29,25 @@ from feedgate.urlnorm import normalize_url
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
+
+
+def _encode_feed_cursor(feed_id: int) -> str:
+    payload = {"i": feed_id}
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_feed_cursor(cursor: str) -> int:
+    padding = "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(cursor + padding)
+        payload = json.loads(raw.decode())
+        return int(payload["i"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid cursor",
+        ) from exc
 
 
 @router.post(
@@ -72,6 +93,7 @@ async def create_feed(
 async def list_feeds(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
+    cursor: Annotated[str | None, Query()] = None,
     limit: int = 50,
     status_filter: Annotated[
         FeedStatus | None,
@@ -84,14 +106,22 @@ async def list_feeds(
     max_limit = request.app.state.api_feeds_max_limit
     limit = max(1, min(limit, max_limit))
     stmt = select(Feed)
+    if cursor is not None:
+        cur_id = _decode_feed_cursor(cursor)
+        stmt = stmt.where(Feed.id > cur_id)
     if status_filter is not None:
         stmt = stmt.where(Feed.status == status_filter)
-    stmt = stmt.order_by(Feed.id.asc()).limit(limit)
+    stmt = stmt.order_by(Feed.id.asc()).limit(limit + 1)
     result = await session.execute(stmt)
-    feeds = result.scalars().all()
+    rows = result.scalars().all()
+    has_more = len(rows) > limit
+    feeds = list(rows[:limit])
+    next_cursor: str | None = None
+    if has_more and feeds:
+        next_cursor = _encode_feed_cursor(feeds[-1].id)
     return PaginatedFeeds(
         items=[FeedResponse.model_validate(f) for f in feeds],
-        next_cursor=None,
+        next_cursor=next_cursor,
     )
 
 

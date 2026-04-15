@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from feedgate.models import Feed
@@ -102,6 +102,93 @@ async def test_get_feed_list_returns_created_feeds(
     urls = {item["url"] for item in body["items"]}
     assert "http://a.test/feed" in urls
     assert "http://b.test/feed" in urls
+
+
+@pytest.mark.asyncio
+async def test_list_feeds_cursor_walks_all_pages(
+    api_client: AsyncClient,
+) -> None:
+    seeded_ids: set[int] = set()
+    for i in range(5):
+        resp = await api_client.post("/v1/feeds", json={"url": f"http://paginate.test/{i}"})
+        assert resp.status_code == 201
+        seeded_ids.add(resp.json()["id"])
+
+    seen_ids: list[int] = []
+    cursor: str | None = None
+    page = 0
+    while True:
+        params: dict[str, str | int] = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = await api_client.get("/v1/feeds", params=params)
+        assert resp.status_code == 200
+        body = resp.json()
+        seen_ids.extend(item["id"] for item in body["items"])
+        next_cursor = body["next_cursor"]
+        if len(body["items"]) == 2 and next_cursor is not None:
+            assert isinstance(next_cursor, str)
+            assert next_cursor
+        if next_cursor is None:
+            break
+        cursor = next_cursor
+        page += 1
+        assert page < 10
+
+    assert len(seen_ids) == 5
+    assert len(set(seen_ids)) == 5
+    assert set(seen_ids) == seeded_ids
+
+
+@pytest.mark.asyncio
+async def test_list_feeds_cursor_with_status_filter(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    active_1 = await api_client.post("/v1/feeds", json={"url": "http://status-page.test/1"})
+    active_2 = await api_client.post("/v1/feeds", json={"url": "http://status-page.test/2"})
+    broken = await api_client.post("/v1/feeds", json={"url": "http://status-page.test/3"})
+    assert active_1.status_code == 201
+    assert active_2.status_code == 201
+    assert broken.status_code == 201
+
+    broken_id = broken.json()["id"]
+    async with async_session_factory() as session:
+        await session.execute(
+            update(Feed).where(Feed.id == broken_id).values(status="broken"),
+        )
+        await session.commit()
+
+    active_ids = {active_1.json()["id"], active_2.json()["id"]}
+    seen_active_ids: list[int] = []
+    cursor: str | None = None
+    while True:
+        params: dict[str, str | int] = {"limit": 1, "status": "active"}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = await api_client.get("/v1/feeds", params=params)
+        assert resp.status_code == 200
+        body = resp.json()
+        for item in body["items"]:
+            assert item["status"] == "active"
+            assert item["id"] != broken_id
+            seen_active_ids.append(item["id"])
+        next_cursor = body["next_cursor"]
+        if next_cursor is None:
+            break
+        cursor = next_cursor
+
+    assert len(seen_active_ids) == 2
+    assert len(set(seen_active_ids)) == 2
+    assert set(seen_active_ids) == active_ids
+
+
+@pytest.mark.asyncio
+async def test_list_feeds_invalid_cursor_returns_400(
+    api_client: AsyncClient,
+) -> None:
+    resp = await api_client.get("/v1/feeds", params={"cursor": "!!!bogus!!!"})
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
