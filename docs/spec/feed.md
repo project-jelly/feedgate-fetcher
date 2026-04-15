@@ -271,13 +271,20 @@ info 레벨은 현재 stdlib root logger가 WARNING 컷이라 안 보이므로
 
 ### 네트워크 설정 (환경변수)
 
-- `FETCH_TIMEOUT` — HTTP 요청 타임아웃 (기본 20초)
-- `FETCH_MAX_BYTES` — 응답 본문 크기 상한 (기본 5MB)
-- `FETCH_MAX_REDIRECTS` — redirect chain 상한 (기본 5)
-- `FETCH_USER_AGENT` — User-Agent 문자열 (기본 `feedgate-fetcher/<ver> (+url)`)
-- `FETCH_MAX_ENTRIES_INITIAL` — 첫 fetch 시 저장할 최대 엔트리 수 (기본 50).
+모든 값은 `FEEDGATE_` 접두사. 실제 목록은 `src/feedgate/config.py`가 단일 source of truth.
+
+- `FEEDGATE_FETCH_CONNECT_TIMEOUT_SECONDS` — TCP 연결 단계 타임아웃 (기본 5.0초)
+- `FEEDGATE_FETCH_READ_TIMEOUT_SECONDS` — 청크 단위 read 비활성 타임아웃 (기본 15.0초)
+- `FEEDGATE_FETCH_WRITE_TIMEOUT_SECONDS` — 요청 바디 write 타임아웃 (기본 10.0초)
+- `FEEDGATE_FETCH_POOL_TIMEOUT_SECONDS` — 커넥션 풀 획득 타임아웃 (기본 5.0초)
+- `FEEDGATE_FETCH_TOTAL_BUDGET_SECONDS` — 한 fetch 전체 벽시계 상한 (기본 30.0초). Slow-loris 방어용 `asyncio.timeout` 가드. 상세는 `resilience.md` 참조.
+- `FEEDGATE_FETCH_MAX_BYTES` — 응답 본문 크기 상한 (기본 5 MiB)
+- `FEEDGATE_FETCH_USER_AGENT` — User-Agent 문자열 (기본 `feedgate-fetcher/<ver> (+url)`)
+- `FEEDGATE_FETCH_MAX_ENTRIES_INITIAL` — 첫 fetch 시 저장할 최대 엔트리 수 (기본 50).
   OpenAI 909건 같은 케이스 방어. 이후 fetch는 새 엔트리만 들어오므로 이
   상한과 무관.
+
+Redirect chain 상한은 현재 httpx 기본값(20 hops)을 그대로 사용하며 별도 설정 항목이 없다 — 명시적 설정이 필요하면 config.py와 이 목록을 additive하게 확장.
 
 ## 등록·조회·해제
 
