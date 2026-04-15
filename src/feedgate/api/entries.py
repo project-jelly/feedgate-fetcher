@@ -97,7 +97,14 @@ async def list_entries(
         # Keyset "after": tuples strictly less than (cur_pub, cur_id) in
         # the sort order `(published_at DESC, id DESC)`.
         if cur_pub is None:
-            stmt = stmt.where(and_(Entry.published_at.is_(None), Entry.id < cur_id))
+            stmt = stmt.where(
+                or_(
+                    and_(Entry.published_at.is_(None), Entry.id < cur_id),
+                    Entry.published_at.is_not(
+                        None
+                    ),  # DESC NULLS FIRST에서 non-null은 모두 이후 구간
+                )
+            )
         else:
             stmt = stmt.where(
                 or_(
