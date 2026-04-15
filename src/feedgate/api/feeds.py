@@ -14,6 +14,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.api import get_session
@@ -51,16 +52,19 @@ async def create_feed(
             detail=f"blocked_url: {exc}",
         ) from exc
 
-    # Idempotent: if already registered, return existing row with 200.
-    existing = (await session.execute(select(Feed).where(Feed.url == url))).scalar_one_or_none()
-    if existing is not None:
-        response.status_code = status.HTTP_200_OK
-        return existing
+    stmt = (
+        pg_insert(Feed)
+        .values(url=url, effective_url=url)
+        .on_conflict_do_nothing(index_elements=["url"])
+        .returning(Feed.id)
+    )
+    result = await session.execute(stmt)
+    new_id = result.scalar_one_or_none()
 
-    feed = Feed(url=url, effective_url=url)
-    session.add(feed)
-    await session.flush()
-    await session.refresh(feed)
+    # Load the row either way (newly inserted OR pre-existing).
+    feed = (await session.execute(select(Feed).where(Feed.url == url))).scalar_one()
+    if new_id is None:
+        response.status_code = status.HTTP_200_OK
     return feed
 
 
