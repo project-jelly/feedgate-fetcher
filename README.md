@@ -83,7 +83,11 @@ most common:
 |---|---|---|
 | `FEEDGATE_DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/feedgate` | asyncpg DSN |
 | `FEEDGATE_FETCH_INTERVAL_SECONDS` | `60` | Scheduler loop interval |
-| `FEEDGATE_FETCH_TIMEOUT_SECONDS` | `20` | Per-request HTTP timeout |
+| `FEEDGATE_FETCH_CONNECT_TIMEOUT_SECONDS` | `5.0` | TCP connect phase timeout |
+| `FEEDGATE_FETCH_READ_TIMEOUT_SECONDS` | `15.0` | Per-chunk read inactivity timeout |
+| `FEEDGATE_FETCH_WRITE_TIMEOUT_SECONDS` | `10.0` | Request body write timeout |
+| `FEEDGATE_FETCH_POOL_TIMEOUT_SECONDS` | `5.0` | Connection pool acquisition timeout |
+| `FEEDGATE_FETCH_TOTAL_BUDGET_SECONDS` | `30.0` | Hard wall-clock cap per fetch (slow-loris guard) |
 | `FEEDGATE_FETCH_MAX_BYTES` | `5242880` | Response body cap |
 | `FEEDGATE_FETCH_USER_AGENT` | `feedgate-fetcher/0.0.1 ...` | User-Agent header |
 | `FEEDGATE_SCHEDULER_ENABLED` | `true` | Disable to skip the background scheduler task |
