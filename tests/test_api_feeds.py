@@ -6,6 +6,8 @@ Covers plan WPs 3.1 (POST), 3.2 (POST idempotency), 3.3 (GET list),
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -62,6 +64,29 @@ async def test_post_feed_is_idempotent(api_client: AsyncClient) -> None:
     )
     assert second.status_code == 200
     assert second.json()["id"] == first_id
+
+
+@pytest.mark.asyncio
+async def test_create_feed_concurrent_idempotent(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    url = "http://concurrent.test/feed.xml"
+    responses = await asyncio.gather(
+        *[api_client.post("/v1/feeds", json={"url": url}) for _ in range(5)]
+    )
+
+    statuses = [resp.status_code for resp in responses]
+    assert all(code in {200, 201} for code in statuses), statuses
+    assert statuses.count(201) == 1, statuses
+    assert statuses.count(200) >= 4, statuses
+
+    ids = [resp.json()["id"] for resp in responses]
+    assert len(set(ids)) == 1, ids
+
+    async with async_session_factory() as session:
+        feeds = (await session.execute(select(Feed).where(Feed.url == url))).scalars().all()
+    assert len(feeds) == 1
 
 
 @pytest.mark.asyncio
