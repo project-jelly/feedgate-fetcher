@@ -5,6 +5,7 @@ Covers plan WP 3.6.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -147,6 +148,79 @@ async def test_list_entries_invalid_feed_ids_returns_400(
 ) -> None:
     resp = await api_client.get("/v1/entries", params={"feed_ids": "not,a,number"})
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_list_entries_cursor_walks_null_to_nonnull_region(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+    truncate_tables: None,
+) -> None:
+    async with async_session_factory() as session:
+        feed = Feed(url="http://cursor.test/feed", effective_url="http://cursor.test/feed")
+        session.add(feed)
+        await session.flush()
+        feed_id = feed.id
+
+        expected_ids: list[int] = []
+
+        for i in range(3):
+            entry = Entry(
+                feed_id=feed_id,
+                guid=f"null-guid-{i}",
+                url=f"http://cursor.test/null/{i}",
+                title=f"Null {i}",
+                content=f"Null content {i}",
+                author="seed",
+                published_at=None,
+                fetched_at=datetime(2026, 4, 15, 0, 0, 0, tzinfo=UTC),
+                content_updated_at=datetime(2026, 4, 15, 0, 0, 0, tzinfo=UTC),
+            )
+            session.add(entry)
+            await session.flush()
+            expected_ids.append(entry.id)
+
+        for i, pub in enumerate(
+            (
+                datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC),
+                datetime(2026, 4, 2, 0, 0, 0, tzinfo=UTC),
+                datetime(2026, 4, 3, 0, 0, 0, tzinfo=UTC),
+            )
+        ):
+            entry = Entry(
+                feed_id=feed_id,
+                guid=f"dated-guid-{i}",
+                url=f"http://cursor.test/dated/{i}",
+                title=f"Dated {i}",
+                content=f"Dated content {i}",
+                author="seed",
+                published_at=pub,
+                fetched_at=datetime(2026, 4, 15, 0, 0, 0, tzinfo=UTC),
+                content_updated_at=datetime(2026, 4, 15, 0, 0, 0, tzinfo=UTC),
+            )
+            session.add(entry)
+            await session.flush()
+            expected_ids.append(entry.id)
+
+        await session.commit()
+
+    collected_ids: list[int] = []
+    cursor: str | None = None
+
+    while True:
+        params: dict[str, str | int] = {"feed_ids": str(feed_id), "limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = await api_client.get("/v1/entries", params=params)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        collected_ids.extend(item["id"] for item in body["items"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+
+    assert Counter(collected_ids) == Counter(expected_ids)
+    assert len(collected_ids) == 6
 
 
 @pytest.mark.asyncio
