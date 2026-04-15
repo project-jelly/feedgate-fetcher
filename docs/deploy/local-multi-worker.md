@@ -162,7 +162,7 @@ docker compose run --rm migrate
 | Migration 자동 실행 | 수동 `docker compose run --rm migrate` | k8s Job + initContainer 패턴 |
 | Secret 관리 | docker-compose.yml에 평문 | k8s Secret + envFrom |
 | Healthcheck | postgres만 | api/worker도 `/healthz` 기반 |
-| Graceful shutdown | uvicorn 기본 (drain 없음) | resilience.md C5 항목 구현 후 |
+| Graceful shutdown | scheduler + retention 루프 cooperative drain (stop_event + 90s budget + force-cancel fallback, `src/feedgate/main.py::_drain_background_task`) | k8s `terminationGracePeriodSeconds` + preStop hook으로 lifecycle 확장 |
 
 이 항목들은 별도 PR로 진행한다. 현재 docker compose 구성은 **로컬 멀티 워커 검증**과 **k8s manifest 작성 전 단계**의 위치를 잡는다.
 
