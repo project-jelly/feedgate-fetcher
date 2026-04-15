@@ -57,8 +57,9 @@ class Feed(Base):
     next_fetch_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Dropped in migration 0004; no code path reads/writes these yet.
-    # Reintroduced in the dedicated ETag/If-Modified-Since feature PR.
+    # Circuit breaker counter used by the feed lifecycle state machine
+    # (spec/feed.md). Incremented on every fetch failure, reset to 0
+    # on success; drives the active -> broken transition at threshold.
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     entries: Mapped[list[Entry]] = relationship(
