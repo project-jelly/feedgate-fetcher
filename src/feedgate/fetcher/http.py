@@ -30,6 +30,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import socket
+import ssl
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
@@ -181,7 +183,7 @@ def _classify_error(exc: BaseException) -> ErrorCode:
     if isinstance(exc, httpx.TimeoutException | TimeoutError):
         return ErrorCode.TIMEOUT
     if isinstance(exc, httpx.ConnectError):
-        return ErrorCode.CONNECTION
+        return _classify_connect_cause(exc)
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 410:
@@ -189,9 +191,37 @@ def _classify_error(exc: BaseException) -> ErrorCode:
         if 400 <= status < 500:
             return ErrorCode.HTTP_4XX
         return ErrorCode.HTTP_5XX
+    if isinstance(exc, httpx.TooManyRedirects):
+        return ErrorCode.REDIRECT_LOOP
     if isinstance(exc, httpx.HTTPError):
         return ErrorCode.HTTP_ERROR
     return ErrorCode.OTHER
+
+
+def _classify_connect_cause(exc: httpx.ConnectError) -> ErrorCode:
+    """Classify connect failures by traversing cause/context chain."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+
+    for _ in range(8):
+        if current is None:
+            break
+        if isinstance(current, ssl.SSLError):
+            return ErrorCode.TLS_ERROR
+        if isinstance(current, socket.gaierror):
+            return ErrorCode.DNS
+        if isinstance(current, ConnectionRefusedError):
+            return ErrorCode.TCP_REFUSED
+
+        current_id = id(current)
+        if current_id in seen:
+            break
+        seen.add(current_id)
+
+        next_exc = current.__cause__ or current.__context__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+
+    return ErrorCode.CONNECTION
 
 
 async def fetch_one(

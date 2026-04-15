@@ -6,9 +6,12 @@ HTTP is issued.
 
 from __future__ import annotations
 
+import socket
+import ssl
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi import FastAPI
@@ -18,10 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from feedgate.config import Settings
 from feedgate.fetcher.http import (
+    _classify_error,
     _compute_next_fetch_at,
     _parse_retry_after,
     fetch_one,
 )
+from feedgate.lifecycle import ErrorCode
 from feedgate.models import Entry, Feed
 
 _TEST_SETTINGS = Settings()
@@ -1014,6 +1019,46 @@ async def test_fetch_one_total_budget_kills_slow_response(
 def test_parse_retry_after_none_returns_none() -> None:
     now = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
     assert _parse_retry_after(None, now=now) is None
+
+
+def test_classify_error_tls() -> None:
+    cause = ssl.SSLError("handshake fail")
+    exc = httpx.ConnectError("tls")
+    exc.__cause__ = cause
+    assert _classify_error(exc) == ErrorCode.TLS_ERROR
+
+
+def test_classify_error_dns() -> None:
+    cause = socket.gaierror(-2, "Name or service not known")
+    exc = httpx.ConnectError("dns")
+    exc.__cause__ = cause
+    assert _classify_error(exc) == ErrorCode.DNS
+
+
+def test_classify_error_tcp_refused() -> None:
+    cause = ConnectionRefusedError()
+    exc = httpx.ConnectError("tcp refused")
+    exc.__cause__ = cause
+    assert _classify_error(exc) == ErrorCode.TCP_REFUSED
+
+
+def test_classify_error_connect_error_without_known_cause() -> None:
+    exc = httpx.ConnectError("generic")
+    assert _classify_error(exc) == ErrorCode.CONNECTION
+
+
+def test_classify_error_too_many_redirects() -> None:
+    exc = httpx.TooManyRedirects("redirect loop")
+    assert _classify_error(exc) == ErrorCode.REDIRECT_LOOP
+
+
+def test_classify_error_nested_cause_chain() -> None:
+    dns_cause = socket.gaierror(-2, "Name or service not known")
+    wrap = OSError("wrap")
+    wrap.__cause__ = dns_cause
+    exc = httpx.ConnectError("outer")
+    exc.__cause__ = wrap
+    assert _classify_error(exc) == ErrorCode.DNS
 
 
 def test_parse_retry_after_integer_seconds() -> None:
