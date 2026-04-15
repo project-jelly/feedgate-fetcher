@@ -27,6 +27,7 @@ from feedgate import retention
 from feedgate.api import register_routers
 from feedgate.config import get_settings
 from feedgate.db import make_engine, make_session_factory
+from feedgate.errors import register_exception_handlers
 from feedgate.fetcher import scheduler
 from feedgate.ssrf import SSRFGuardTransport
 
@@ -174,6 +175,7 @@ def create_app() -> FastAPI:
     app.state.api_entries_max_limit = settings.api_entries_max_limit
     app.state.api_feeds_max_limit = settings.api_feeds_max_limit
     register_routers(app)
+    register_exception_handlers(app)
     return app
 
 
