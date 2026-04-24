@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
+import structlog
 from prometheus_client import Counter, Gauge, Histogram
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from feedgate.models import Entry, Feed, FeedStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 # ── RED: fetch pipeline ──────────────────────────────────────────────────────
 FETCH_TOTAL = Counter(

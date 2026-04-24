@@ -24,9 +24,9 @@ batch immediately to keep transactions short.
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 
+import structlog
 from fastapi import FastAPI
 from sqlalchemy import delete, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from feedgate.metrics import RETENTION_DELETED_TOTAL
 from feedgate.models import Entry
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 async def sweep(

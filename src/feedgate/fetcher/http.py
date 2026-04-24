@@ -22,7 +22,6 @@ On failure:
 from __future__ import annotations
 
 import asyncio
-import logging
 import random
 import socket
 import ssl
@@ -31,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 import httpx
+import structlog
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +40,7 @@ from feedgate.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
 from feedgate.models import Entry, ErrorCode, Feed, FeedStatus
 from feedgate.ssrf import BlockedURLError, validate_public_url
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 class NotAFeedError(Exception):
@@ -182,7 +182,10 @@ def _parse_retry_after(header: str | None, *, now: datetime) -> int | None:
 
 
 def _parse_cache_hint(headers: httpx.Headers, *, now: datetime) -> int | None:
-    """Parse Cache-Control max-age or Expires → seconds from now. Returns None if absent/unparseable."""
+    """Parse Cache-Control max-age or Expires.
+
+    Returns seconds from now, or None if absent/unparseable.
+    """
     cc = headers.get("cache-control", "")
     for part in cc.split(","):
         stripped = part.strip()

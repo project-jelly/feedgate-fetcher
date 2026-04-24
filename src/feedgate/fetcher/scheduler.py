@@ -29,19 +29,18 @@ The app reads its state from ``app.state``:
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
+import structlog
 from fastapi import FastAPI
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.http import fetch_one
-from feedgate.models import FeedStatus
-from feedgate.models import Feed
+from feedgate.models import Feed, FeedStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 def _host_key(url: str) -> str:

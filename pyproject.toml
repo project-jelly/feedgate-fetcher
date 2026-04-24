@@ -19,6 +19,7 @@ dependencies = [
     "rfc3986>=2.0",
     "anyio>=4.0",
     "prometheus-client>=0.21",
+    "structlog>=24.0",
 ]
 
 [dependency-groups]

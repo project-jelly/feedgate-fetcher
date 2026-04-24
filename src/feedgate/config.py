@@ -116,6 +116,8 @@ class Settings(BaseSettings):
 
     api_key: str = ""  # empty = no auth
     api_rate_limit: str = "60/minute"  # applied to POST /v1/feeds per IP
+    log_level: str = "INFO"
+    log_json: bool = False
 
 
 def get_settings() -> Settings:

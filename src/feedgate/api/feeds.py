@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlsplit, urlunsplit
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -21,12 +22,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from urllib.parse import urlsplit, urlunsplit
-
 from feedgate.api import get_session
 from feedgate.config import get_settings
-from feedgate.models import FeedStatus
-from feedgate.models import Feed
+from feedgate.models import Feed, FeedStatus
 from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate.ssrf import BlockedURLError, validate_public_url
 
@@ -70,7 +68,7 @@ def normalize_url(raw: str) -> str:
 
     return urlunsplit((scheme, netloc, path, parts.query, ""))
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
 limiter = Limiter(key_func=get_remote_address)

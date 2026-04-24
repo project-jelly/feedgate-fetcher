@@ -22,8 +22,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
-from slowapi import Limiter
-from slowapi import _rate_limit_exceeded_handler
+from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
@@ -34,11 +33,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from feedgate.fetcher import retention
+from feedgate import metrics as _metrics
 from feedgate.api import register_exception_handlers, register_routers
 from feedgate.config import get_settings
-from feedgate.fetcher import scheduler
-from feedgate import metrics as _metrics
+from feedgate.fetcher import retention, scheduler
+from feedgate.logging_config import configure_logging
 from feedgate.ssrf import SSRFGuardTransport
 
 logger = logging.getLogger(__name__)
@@ -124,6 +123,7 @@ def create_app() -> FastAPI:
     when enabled and (b) cleaning up resources at shutdown.
     """
     settings = get_settings()
+    configure_logging(settings.log_level, settings.log_json)
     limiter = Limiter(key_func=get_remote_address, default_limits=[settings.api_rate_limit])
     engine = make_engine(
         settings.database_url,
