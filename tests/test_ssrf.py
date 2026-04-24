@@ -254,13 +254,15 @@ async def test_transport_guard_blocks_redirect_target(
         "http://10.0.0.1/feed",  # TC-D1-01
         "http://127.0.0.1/feed",  # TC-D1-02
         "http://169.254.169.254/latest/meta-data/",  # TC-D2-01
-        "file:///etc/passwd",
     ],
 )
 async def test_post_feed_rejects_blocked_url(
     api_client: AsyncClient,
     url: str,
 ) -> None:
+    # Non-http schemes (file://, javascript:, …) are rejected one layer
+    # earlier by the FeedCreate schema — see tests/test_feed_create_schema.py.
+    # This test covers the SSRF layer, which only kicks in for http(s).
     resp = await api_client.post("/v1/feeds", json={"url": url})
     assert resp.status_code == 400, resp.text
     assert "blocked_url" in resp.text

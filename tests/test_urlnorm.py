@@ -1,28 +1,14 @@
-"""URL normalization cases per docs/spec/feed.md."""
+"""``normalize_url`` unit tests.
+
+``normalize_url`` runs on the stringified ``HttpUrl`` from ``FeedCreate``
+and is now a thin layer on top of it — scheme/host/port/IDN/whitespace
+handling lives in ``HttpUrl`` (see ``tests/test_feed_create_schema.py``).
+What remains here: trailing-slash collapsing and fragment removal.
+"""
 
 from __future__ import annotations
 
 from feedgate_fetcher.api.feeds import normalize_url
-
-
-def test_scheme_lowercased() -> None:
-    assert normalize_url("HTTP://example.com/feed") == "http://example.com/feed"
-
-
-def test_host_lowercased() -> None:
-    assert normalize_url("http://EXAMPLE.COM/feed") == "http://example.com/feed"
-
-
-def test_default_http_port_stripped() -> None:
-    assert normalize_url("http://example.com:80/feed") == "http://example.com/feed"
-
-
-def test_default_https_port_stripped() -> None:
-    assert normalize_url("https://example.com:443/feed") == "https://example.com/feed"
-
-
-def test_non_default_port_kept() -> None:
-    assert normalize_url("http://example.com:8080/feed") == "http://example.com:8080/feed"
 
 
 def test_trailing_slash_removed_from_path() -> None:
@@ -42,12 +28,5 @@ def test_query_preserved() -> None:
     assert normalize_url(url) == url
 
 
-def test_idn_host_to_punycode() -> None:
-    # 한글.kr -> xn--bj0bj06e.kr (standard IDNA for that label)
-    normalized = normalize_url("http://한글.kr/feed")
-    assert normalized.startswith("http://xn--")
-    assert normalized.endswith(".kr/feed")
-
-
-def test_whitespace_stripped() -> None:
-    assert normalize_url("  http://example.com/feed  ") == "http://example.com/feed"
+def test_bare_path_unchanged() -> None:
+    assert normalize_url("http://example.com/feed") == "http://example.com/feed"
