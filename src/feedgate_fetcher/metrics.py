@@ -1,4 +1,5 @@
 """Prometheus metrics — RED + USE + state gauges."""
+
 from __future__ import annotations
 
 import asyncio
@@ -90,9 +91,7 @@ async def _collect_state(
             ).scalar_one()
             FEEDS_BY_STATUS.labels(status=status.value).set(count)
 
-        entry_count = (
-            await session.execute(select(func.count()).select_from(Entry))
-        ).scalar_one()
+        entry_count = (await session.execute(select(func.count()).select_from(Entry))).scalar_one()
         ENTRIES_TOTAL.set(entry_count)
 
         now = datetime.now(UTC)

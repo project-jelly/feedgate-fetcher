@@ -71,11 +71,7 @@ async def sweep(
     keep = union(time_window, top_n).subquery("keep")
 
     if batch_size > 0:
-        victim_ids = (
-            select(Entry.id)
-            .where(Entry.id.not_in(select(keep.c.id)))
-            .limit(batch_size)
-        )
+        victim_ids = select(Entry.id).where(Entry.id.not_in(select(keep.c.id))).limit(batch_size)
         stmt = (
             delete(Entry)
             .where(Entry.id.in_(victim_ids))

@@ -177,6 +177,7 @@ def _add_metrics_middleware(app: FastAPI) -> None:
             route = request.scope.get("route")
             path = route.path if route else request.url.path
             from feedgate_fetcher.metrics import API_DURATION, API_REQUESTS_TOTAL
+
             API_REQUESTS_TOTAL.labels(
                 method=request.method,
                 path=path,

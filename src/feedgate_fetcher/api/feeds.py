@@ -68,6 +68,7 @@ def normalize_url(raw: str) -> str:
 
     return urlunsplit((scheme, netloc, path, parts.query, ""))
 
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
