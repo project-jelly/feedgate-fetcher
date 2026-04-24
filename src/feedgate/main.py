@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from feedgate import retention
+from feedgate.fetcher import retention
 from feedgate.api import register_exception_handlers, register_routers
 from feedgate.config import get_settings
 from feedgate.fetcher import scheduler
