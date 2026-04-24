@@ -6,6 +6,7 @@ HTTP is issued.
 
 from __future__ import annotations
 
+import gzip
 import socket
 import ssl
 from datetime import UTC, datetime, timedelta
@@ -516,6 +517,49 @@ async def test_fetch_one_rejects_oversized_response_as_too_large(
 
     state = await _load_feed(sf, feed_id)
     assert state["last_error_code"] == "too_large"
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 1
+    assert await _count_entries_for_feed(sf, feed_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_compression_bomb_blocked(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A tiny gzip body that inflates past ``max_bytes`` must still
+    be rejected as ``too_large`` because httpx auto-decompresses."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/gzip-bomb-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    compressed = gzip.compress(b"x" * 1025)  # decompressed > 1024 cap
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=compressed,
+            headers={
+                "Content-Type": "application/atom+xml",
+                "Content-Encoding": "gzip",
+            },
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(max_bytes=1024),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == ErrorCode.TOO_LARGE
     assert state["last_successful_fetch_at"] is None
     assert state["consecutive_failures"] == 1
     assert await _count_entries_for_feed(sf, feed_id) == 0
