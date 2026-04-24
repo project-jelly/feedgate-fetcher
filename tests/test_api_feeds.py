@@ -88,6 +88,7 @@ async def test_post_feed_rate_limit_returns_429(
     app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = async_session_factory
     app.state.api_key = ""
+    app.state.fetch_interval_seconds = settings.fetch_interval_seconds
     app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit

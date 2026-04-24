@@ -131,6 +131,7 @@ async def api_app(
     app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = async_session_factory
     app.state.api_key = ""  # no auth in tests by default
+    app.state.fetch_interval_seconds = settings.fetch_interval_seconds
     app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit
@@ -172,7 +173,6 @@ async def fetch_app(
     app.state.fetch_interval_seconds = 60
     app.state.fetch_user_agent = "feedgate-fetcher/test"
     app.state.fetch_concurrency = settings.fetch_concurrency
-    app.state.fetch_per_host_concurrency = settings.fetch_per_host_concurrency
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
     app.state.fetch_max_bytes = settings.fetch_max_bytes

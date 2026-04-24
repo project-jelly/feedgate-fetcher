@@ -23,6 +23,7 @@ async def auth_app(
     app = FastAPI()
     app.state.session_factory = async_session_factory
     app.state.api_key = "test-secret"
+    app.state.fetch_interval_seconds = settings.fetch_interval_seconds
     app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
+import random
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 
@@ -110,6 +111,7 @@ async def create_feed(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
+    interval = request.app.state.fetch_interval_seconds
     del request  # required by slowapi decorator
     url = normalize_url(payload.url)
 
@@ -123,10 +125,10 @@ async def create_feed(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"blocked_url: {exc}",
         ) from exc
-
+    jitter = timedelta(seconds=random.randint(0, interval))
     stmt = (
         pg_insert(Feed)
-        .values(url=url, effective_url=url)
+        .values(url=url, effective_url=url, next_fetch_at=datetime.now(UTC) + jitter)
         .on_conflict_do_nothing(index_elements=["url"])
         .returning(Feed.id)
     )
@@ -212,12 +214,12 @@ async def reactivate_feed(
 
     if feed.status != FeedStatus.ACTIVE:
         logger.warning(
-            "feed_id=%s url=%s state=%s->%s reason=%s",
-            feed.id,
-            feed.effective_url,
-            feed.status,
-            FeedStatus.ACTIVE,
-            "manual_reactivate",
+            "feed_state_transition",
+            feed_id=feed.id,
+            url=feed.effective_url,
+            old_status=feed.status,
+            new_status=FeedStatus.ACTIVE,
+            reason="manual_reactivate",
         )
 
     feed.status = FeedStatus.ACTIVE
