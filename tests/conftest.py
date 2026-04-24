@@ -21,6 +21,9 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -30,6 +33,7 @@ from sqlalchemy.ext.asyncio import (
 from testcontainers.postgres import PostgresContainer
 
 from feedgate.api import register_routers
+from feedgate.api import feeds as feeds_api
 from feedgate.config import Settings
 from feedgate.main import make_engine, make_session_factory
 
@@ -122,6 +126,9 @@ async def api_app(
     """
     settings = Settings()
     app = FastAPI()
+    app.state.limiter = feeds_api.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = async_session_factory
     app.state.api_key = ""  # no auth in tests by default
     app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids

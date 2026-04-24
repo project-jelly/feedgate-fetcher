@@ -22,6 +22,11 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from slowapi import Limiter
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -119,6 +124,7 @@ def create_app() -> FastAPI:
     when enabled and (b) cleaning up resources at shutdown.
     """
     settings = get_settings()
+    limiter = Limiter(key_func=get_remote_address, default_limits=[settings.api_rate_limit])
     engine = make_engine(
         settings.database_url,
         pool_size=settings.db_pool_size,
@@ -197,6 +203,9 @@ def create_app() -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="feedgate-fetcher", lifespan=lifespan)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = session_factory
     app.state.http_client = http_client
     app.state.fetch_interval_seconds = settings.fetch_interval_seconds

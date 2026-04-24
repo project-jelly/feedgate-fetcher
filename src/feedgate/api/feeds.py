@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import urlsplit, urlunsplit
 
 from feedgate.api import get_session
+from feedgate.config import get_settings
 from feedgate.models import FeedStatus
 from feedgate.models import Feed
 from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
@@ -70,6 +73,11 @@ def normalize_url(raw: str) -> str:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
+limiter = Limiter(key_func=get_remote_address)
+
+
+def _create_feed_rate_limit() -> str:
+    return get_settings().api_rate_limit
 
 
 def _encode_feed_cursor(feed_id: int) -> str:
@@ -96,11 +104,14 @@ def _decode_feed_cursor(cursor: str) -> int:
     response_model=FeedResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit(_create_feed_rate_limit)
 async def create_feed(
+    request: Request,
     payload: FeedCreate,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
+    del request  # required by slowapi decorator
     url = normalize_url(payload.url)
 
     # SSRF guard: cheap check (scheme + IP literal). Hostname-resolution

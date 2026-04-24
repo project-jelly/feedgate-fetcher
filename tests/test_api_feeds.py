@@ -9,10 +9,17 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from httpx import AsyncClient
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from feedgate.api import register_routers
+from feedgate.api import feeds as feeds_api
+from feedgate.config import Settings
 from feedgate.models import Feed
 
 
@@ -64,6 +71,38 @@ async def test_post_feed_is_idempotent(api_client: AsyncClient) -> None:
     )
     assert second.status_code == 200
     assert second.json()["id"] == first_id
+
+
+@pytest.mark.asyncio
+async def test_post_feed_rate_limit_returns_429(
+    async_session_factory: async_sessionmaker[AsyncSession],
+    truncate_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FEEDGATE_API_RATE_LIMIT", "1/minute")
+
+    settings = Settings()
+    app = FastAPI()
+    app.state.limiter = feeds_api.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+    app.state.session_factory = async_session_factory
+    app.state.api_key = ""
+    app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
+    app.state.api_entries_default_limit = settings.api_entries_default_limit
+    app.state.api_entries_max_limit = settings.api_entries_max_limit
+    app.state.api_feeds_max_limit = settings.api_feeds_max_limit
+    register_routers(app)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("203.0.113.10", 50000)),
+        base_url="http://test",
+    ) as client:
+        first = await client.post("/v1/feeds", json={"url": "http://ratelimit.test/feed.xml"})
+        second = await client.post("/v1/feeds", json={"url": "http://ratelimit.test/feed2.xml"})
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 429, second.text
 
 
 @pytest.mark.asyncio
