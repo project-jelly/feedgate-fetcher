@@ -670,6 +670,35 @@ async def test_scheduler_run_exits_cleanly_when_stop_event_is_set(
 
 
 @pytest.mark.asyncio
+async def test_scheduler_run_backs_off_on_repeated_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated loop errors should apply exponential backoff so the
+    scheduler does not spin and flood logs."""
+    app = FastAPI()
+    app.state.fetch_interval_seconds = 0.05
+    calls = 0
+
+    async def always_fail(_app: FastAPI) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("db disconnected")
+
+    monkeypatch.setattr(scheduler, "tick_once", always_fail)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler.run(app, stop_event=stop))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.3)
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    # Immediate first tick, then 50ms, 100ms, 200ms backoff...
+    assert calls <= 3
+
+
+@pytest.mark.asyncio
 async def test_scheduler_run_drains_in_flight_fetch_before_exit(
     fetch_app: FastAPI,
     respx_mock: respx.Router,

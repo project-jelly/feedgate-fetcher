@@ -232,12 +232,21 @@ async def run(
     """
     interval = app.state.fetch_interval_seconds
     stop = stop_event or asyncio.Event()
+    consecutive_errors = 0
     while not stop.is_set():
         try:
             await tick_once(app)
+            consecutive_errors = 0
         except Exception:
+            consecutive_errors += 1
             logger.exception("scheduler tick raised; continuing")
+        timeout = interval
+        if consecutive_errors > 0:
+            timeout = min(
+                interval * (2 ** min(consecutive_errors - 1, 5)),
+                300,
+            )
         try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
+            await asyncio.wait_for(stop.wait(), timeout=timeout)
         except TimeoutError:
             continue

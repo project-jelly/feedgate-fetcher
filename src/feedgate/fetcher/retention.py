@@ -149,13 +149,22 @@ async def run(
     """
     interval = app.state.retention_sweep_interval_seconds
     stop = stop_event or asyncio.Event()
+    consecutive_errors = 0
     while not stop.is_set():
         try:
             n = await tick_once(app)
+            consecutive_errors = 0
             logger.info("retention sweep deleted %d entries", n)
         except Exception:
+            consecutive_errors += 1
             logger.exception("retention sweep raised; continuing")
+        timeout = interval
+        if consecutive_errors > 0:
+            timeout = min(
+                interval * (2 ** min(consecutive_errors - 1, 5)),
+                300,
+            )
         try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
+            await asyncio.wait_for(stop.wait(), timeout=timeout)
         except TimeoutError:
             continue
