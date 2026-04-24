@@ -31,7 +31,7 @@ from testcontainers.postgres import PostgresContainer
 
 from feedgate.api import register_routers
 from feedgate.config import Settings
-from feedgate.db import make_engine, make_session_factory
+from feedgate.main import make_engine, make_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"

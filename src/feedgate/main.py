@@ -22,16 +22,52 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from feedgate import retention
 from feedgate.api import register_routers
 from feedgate.config import get_settings
-from feedgate.db import make_engine, make_session_factory
 from feedgate.errors import register_exception_handlers
 from feedgate.fetcher import scheduler
 from feedgate.ssrf import SSRFGuardTransport
 
 logger = logging.getLogger(__name__)
+
+
+def make_engine(
+    database_url: str,
+    *,
+    pool_size: int = 8,
+    max_overflow: int = 4,
+    pool_timeout: int = 30,
+    pool_recycle: int = 1800,
+) -> AsyncEngine:
+    """Create an async engine. URL must use the asyncpg driver."""
+    return create_async_engine(
+        database_url,
+        future=True,
+        echo=False,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+    )
+
+
+def make_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 
 
 async def _drain_background_task(
