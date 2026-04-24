@@ -74,6 +74,33 @@ async def test_post_feed_is_idempotent(api_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_feed_trailing_slash_is_idempotent(api_client: AsyncClient) -> None:
+    first = await api_client.post("/v1/feeds", json={"url": "http://blog.test/rss"})
+    second = await api_client.post("/v1/feeds", json={"url": "http://blog.test/rss/"})
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "",
+        "   ",
+        "not-a-url",
+        "ftp://example.com/feed",
+        "javascript:alert(1)",
+        "http://example.com/ feed",
+        "http:// example.com/feed",
+    ],
+)
+@pytest.mark.asyncio
+async def test_post_feed_rejects_invalid_url(api_client: AsyncClient, bad_url: str) -> None:
+    resp = await api_client.post("/v1/feeds", json={"url": bad_url})
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
 async def test_post_feed_rate_limit_returns_429(
     async_session_factory: async_sessionmaker[AsyncSession],
     truncate_tables: None,

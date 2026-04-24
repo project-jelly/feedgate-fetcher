@@ -13,13 +13,23 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 
 from feedgate_fetcher.models import ErrorCode, FeedStatus
 
 
 class FeedCreate(BaseModel):
-    url: str = Field(..., min_length=1)
+    url: HttpUrl
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _reject_internal_whitespace(cls, value: object) -> object:
+        # HttpUrl silently percent-encodes embedded whitespace (WHATWG-compliant),
+        # but an embedded space is almost always a paste error. Reject it at the
+        # boundary so the caller gets a 422 instead of a feed that will never fetch.
+        if isinstance(value, str) and any(ch.isspace() for ch in value.strip()):
+            raise ValueError("url must not contain whitespace")
+        return value
 
 
 class FeedResponse(BaseModel):

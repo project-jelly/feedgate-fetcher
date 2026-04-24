@@ -29,45 +29,23 @@ from feedgate_fetcher.models import Feed, FeedStatus
 from feedgate_fetcher.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
-_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
-
-
-def _to_idna(host: str) -> str:
-    """Convert an IDN host to its punycode form, lowercased on failure."""
-    if not host:
-        return ""
-    try:
-        return host.encode("idna").decode("ascii")
-    except UnicodeError:
-        return host.lower()
-
 
 def normalize_url(raw: str) -> str:
-    parts = urlsplit(raw.strip())
+    """Trailing-slash + fragment normalization.
 
-    scheme = parts.scheme.lower()
-    host = _to_idna(parts.hostname or "")
-
-    port = parts.port
-    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
-        port = None
-
-    netloc = host
-    if parts.username:
-        cred = parts.username
-        if parts.password:
-            cred = f"{cred}:{parts.password}"
-        netloc = f"{cred}@{netloc}"
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-
+    Called with the stringified ``HttpUrl`` from ``FeedCreate``, which has
+    already handled scheme/host casing, default-port stripping, IDN →
+    punycode, and whitespace rejection. This function only collapses the
+    path-trailing-slash quirk (``/rss/`` and ``/rss`` must map to the same
+    feed) and drops the fragment.
+    """
+    parts = urlsplit(raw)
     path = parts.path
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
     if path == "/":
         path = ""
-
-    return urlunsplit((scheme, netloc, path, parts.query, ""))
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
 
 
 logger = structlog.get_logger()
@@ -113,7 +91,7 @@ async def create_feed(
 ) -> Feed:
     interval = request.app.state.fetch_interval_seconds
     del request  # required by slowapi decorator
-    url = normalize_url(payload.url)
+    url = normalize_url(str(payload.url))
 
     # SSRF guard: cheap check (scheme + IP literal). Hostname-resolution
     # check happens at fetch time so a flaky resolver cannot drop a
