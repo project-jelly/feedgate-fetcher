@@ -32,6 +32,7 @@ from feedgate.models import Entry, Feed
 _TEST_SETTINGS = Settings()
 _FETCH_DEFAULTS: dict[str, Any] = {
     "max_bytes": _TEST_SETTINGS.fetch_max_bytes,
+    "max_entries_per_fetch": _TEST_SETTINGS.fetch_max_entries_per_fetch,
     "max_entries_initial": _TEST_SETTINGS.fetch_max_entries_initial,
     "total_budget_seconds": _TEST_SETTINGS.fetch_total_budget_seconds,
     "broken_threshold": _TEST_SETTINGS.broken_threshold,
@@ -1871,3 +1872,68 @@ async def test_entry_frequency_broken_feed_ignores_history(
     state = await _load_feed(sf, feed_id)
     delta = (state["next_fetch_at"] - now).total_seconds()
     assert abs(delta - 864) > 5
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_caps_entries_on_subsequent_fetch_with_per_fetch_limit(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/per-fetch-cap-subsequent"
+    feed_id = await _create_feed(sf, feed_url)
+
+    # Ensure this is a subsequent fetch path (initial cap does not apply).
+    async with sf() as session:
+        seed_feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        session.add(
+            Entry(
+                feed_id=feed_id,
+                guid=f"{seed_feed.url}#seed",
+                url=f"{seed_feed.url}#seed",
+                fetched_at=datetime(2026, 4, 10, 0, 0, 0, tzinfo=UTC),
+                content_updated_at=datetime(2026, 4, 10, 0, 0, 0, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+    ten_entries_body = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Per-fetch cap</title>
+  <id>http://t.test/per-fetch-cap-subsequent</id>
+  <updated>2026-04-11T00:00:00Z</updated>
+  <entry><title>E0</title><id>http://t.test/per-fetch-cap-subsequent/e0</id><link href="http://t.test/per-fetch-cap-subsequent/e0"/><published>2026-04-11T00:00:00Z</published><content>b0</content></entry>
+  <entry><title>E1</title><id>http://t.test/per-fetch-cap-subsequent/e1</id><link href="http://t.test/per-fetch-cap-subsequent/e1"/><published>2026-04-11T01:00:00Z</published><content>b1</content></entry>
+  <entry><title>E2</title><id>http://t.test/per-fetch-cap-subsequent/e2</id><link href="http://t.test/per-fetch-cap-subsequent/e2"/><published>2026-04-11T02:00:00Z</published><content>b2</content></entry>
+  <entry><title>E3</title><id>http://t.test/per-fetch-cap-subsequent/e3</id><link href="http://t.test/per-fetch-cap-subsequent/e3"/><published>2026-04-11T03:00:00Z</published><content>b3</content></entry>
+  <entry><title>E4</title><id>http://t.test/per-fetch-cap-subsequent/e4</id><link href="http://t.test/per-fetch-cap-subsequent/e4"/><published>2026-04-11T04:00:00Z</published><content>b4</content></entry>
+  <entry><title>E5</title><id>http://t.test/per-fetch-cap-subsequent/e5</id><link href="http://t.test/per-fetch-cap-subsequent/e5"/><published>2026-04-11T05:00:00Z</published><content>b5</content></entry>
+  <entry><title>E6</title><id>http://t.test/per-fetch-cap-subsequent/e6</id><link href="http://t.test/per-fetch-cap-subsequent/e6"/><published>2026-04-11T06:00:00Z</published><content>b6</content></entry>
+  <entry><title>E7</title><id>http://t.test/per-fetch-cap-subsequent/e7</id><link href="http://t.test/per-fetch-cap-subsequent/e7"/><published>2026-04-11T07:00:00Z</published><content>b7</content></entry>
+  <entry><title>E8</title><id>http://t.test/per-fetch-cap-subsequent/e8</id><link href="http://t.test/per-fetch-cap-subsequent/e8"/><published>2026-04-11T08:00:00Z</published><content>b8</content></entry>
+  <entry><title>E9</title><id>http://t.test/per-fetch-cap-subsequent/e9</id><link href="http://t.test/per-fetch-cap-subsequent/e9"/><published>2026-04-11T09:00:00Z</published><content>b9</content></entry>
+</feed>
+"""
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ten_entries_body,
+            headers={"Content-Type": "application/atom+xml"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(max_entries_per_fetch=3),
+        )
+        await session.commit()
+
+    # seed(1) + capped new entries(3) = 4 total
+    assert await _count_entries_for_feed(sf, feed_id) == 4

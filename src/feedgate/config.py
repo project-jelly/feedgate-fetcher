@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     fetch_max_bytes: int = 5 * 1024 * 1024
     fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
+    fetch_max_entries_per_fetch: int = 200
     fetch_concurrency: int = 4
     # Per-host concurrency cap. The global ``fetch_concurrency`` bounds
     # how many feeds we fetch simultaneously across the whole tick;

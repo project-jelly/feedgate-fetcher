@@ -69,6 +69,7 @@ async def _process_feed(
     interval = app.state.fetch_interval_seconds
     ua = app.state.fetch_user_agent
     max_bytes = app.state.fetch_max_bytes
+    max_entries_per_fetch = app.state.fetch_max_entries_per_fetch
     max_entries_initial = app.state.fetch_max_entries_initial
     total_budget = app.state.fetch_total_budget_seconds
     broken_threshold = app.state.broken_threshold
@@ -103,6 +104,7 @@ async def _process_feed(
                     interval_seconds=interval,
                     user_agent=ua,
                     max_bytes=max_bytes,
+                    max_entries_per_fetch=max_entries_per_fetch,
                     max_entries_initial=max_entries_initial,
                     total_budget_seconds=total_budget,
                     broken_threshold=broken_threshold,

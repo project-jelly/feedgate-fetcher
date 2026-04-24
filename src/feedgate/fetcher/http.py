@@ -264,6 +264,7 @@ async def fetch_one(
     interval_seconds: int,
     user_agent: str,
     max_bytes: int,
+    max_entries_per_fetch: int,
     max_entries_initial: int,
     total_budget_seconds: float,
     broken_threshold: int,
@@ -382,6 +383,8 @@ async def fetch_one(
         parsed = await parse_feed(body)
         entries_to_upsert = parsed.entries
         if entries_to_upsert:
+            if len(entries_to_upsert) > max_entries_per_fetch:
+                entries_to_upsert = entries_to_upsert[:max_entries_per_fetch]
             has_existing_entries = (
                 await session.execute(select(exists().where(Entry.feed_id == feed.id)))
             ).scalar_one()
