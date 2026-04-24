@@ -216,6 +216,7 @@ def create_app() -> FastAPI:
     app.state.retention_days = settings.retention_days
     app.state.retention_min_per_feed = settings.retention_min_per_feed
     app.state.retention_sweep_interval_seconds = settings.retention_sweep_interval_seconds
+    app.state.retention_batch_size = settings.retention_batch_size
     app.state.broken_threshold = settings.broken_threshold
     app.state.dead_duration_days = settings.dead_duration_days
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds

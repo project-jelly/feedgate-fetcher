@@ -267,6 +267,34 @@ async def test_sweep_returns_zero_when_nothing_to_delete(
     assert await _count_entries(async_session, feed_id) == 5
 
 
+@pytest.mark.asyncio
+async def test_sweep_batch_size_limits_single_delete(
+    async_session: AsyncSession,
+    truncate_tables: None,
+) -> None:
+    feed_id = await _mk_feed(async_session, "http://t.test/feed-batch")
+
+    ancient = datetime(2020, 1, 1, tzinfo=UTC)
+    for i in range(10):
+        await _mk_entry(
+            async_session,
+            feed_id,
+            guid=f"batch-{i}",
+            fetched_at=ancient + timedelta(hours=i),
+        )
+    await async_session.flush()
+
+    deleted = await sweep(
+        async_session,
+        cutoff=datetime(2026, 1, 1, tzinfo=UTC),
+        min_per_feed=0,
+        batch_size=3,
+    )
+
+    assert deleted == 3
+    assert await _count_entries(async_session, feed_id) == 7
+
+
 # ---- retention.tick_once integration ---------------------------------------
 
 
@@ -281,6 +309,7 @@ async def retention_app(
     app.state.retention_days = 90
     app.state.retention_min_per_feed = 2
     app.state.retention_sweep_interval_seconds = 3600
+    app.state.retention_batch_size = 0
     return app
 
 

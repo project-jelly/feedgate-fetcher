@@ -16,7 +16,9 @@ The ``cutoff`` is passed in explicitly so callers (and tests) control
 the clock. Production code calls with ``datetime.now(UTC) -
 timedelta(days=settings.retention_days)``.
 
-The function does NOT commit — the caller owns the transaction.
+By default (``batch_size=0``), the function does NOT commit.
+When ``batch_size>0``, it deletes at most one batch and commits that
+batch immediately to keep transactions short.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ async def sweep(
     *,
     cutoff: datetime,
     min_per_feed: int,
+    batch_size: int = 0,
 ) -> int:
     """Delete aged-out entries that fall outside both retain windows.
 
@@ -47,8 +50,8 @@ async def sweep(
     function CTE computes per-feed row numbers, the keep set is a
     UNION of the time window and the per-feed top-N, and the final
     DELETE ... RETURNING is an ORM-level bulk delete. Returns the
-    number of rows deleted. Does not commit — the caller is
-    responsible for the transaction.
+    number of rows deleted. By default (``batch_size=0``), does not
+    commit. When ``batch_size>0``, commits the single deleted batch.
     """
     # Per-feed ranking by fetched_at DESC, id DESC (matches the
     # compound keyset index on entries).
@@ -66,6 +69,24 @@ async def sweep(
     time_window = select(Entry.id).where(Entry.fetched_at >= cutoff)
     top_n = select(ranked.c.id).where(ranked.c.rn <= min_per_feed)
     keep = union(time_window, top_n).subquery("keep")
+
+    if batch_size > 0:
+        victim_ids = (
+            select(Entry.id)
+            .where(Entry.id.not_in(select(keep.c.id)))
+            .limit(batch_size)
+        )
+        stmt = (
+            delete(Entry)
+            .where(Entry.id.in_(victim_ids))
+            .returning(Entry.id)
+            .execution_options(synchronize_session=False)
+        )
+        result = await session.execute(stmt)
+        n = len(result.fetchall())
+        if n > 0:
+            await session.commit()
+        return n
 
     stmt = (
         delete(Entry)
@@ -94,6 +115,7 @@ async def tick_once(
     now = now or datetime.now(UTC)
     days: int = app.state.retention_days
     min_per_feed: int = app.state.retention_min_per_feed
+    batch_size: int = app.state.retention_batch_size
     cutoff = now - timedelta(days=days)
 
     sf = app.state.session_factory
@@ -103,6 +125,7 @@ async def tick_once(
                 session,
                 cutoff=cutoff,
                 min_per_feed=min_per_feed,
+                batch_size=batch_size,
             )
             await session.commit()
             if n > 0:

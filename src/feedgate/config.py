@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     retention_min_per_feed: int = 20
     retention_sweep_interval_seconds: int = 3600
     retention_enabled: bool = True
+    retention_batch_size: int = 1000
 
     # Feed lifecycle state machine (docs/spec/feed.md).
     # active -> broken after `broken_threshold` consecutive failures.
