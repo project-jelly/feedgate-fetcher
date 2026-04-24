@@ -212,6 +212,10 @@ __marimo__/
 .omc/notepad.md
 .omc/logs/
 .omc/research/
+.omc/artifacts/
+
+# Temporary analysis repos (cloned for reference only)
+.repos/
 
 # Overnight verification run state (ephemeral logs, PIDs, per-run JSON)
 var/
