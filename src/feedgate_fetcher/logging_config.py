@@ -6,12 +6,15 @@ import logging
 
 import structlog
 
+_SILENT_PATHS = frozenset({"/healthz", "/metrics"})
 
-class _HealthzFilter(logging.Filter):
-    """Drop uvicorn.access records for /healthz — probe noise."""
+
+class _SilentPathFilter(logging.Filter):
+    """Drop uvicorn.access records for probe/scrape endpoints."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return "/healthz" not in record.getMessage()
+        msg = record.getMessage()
+        return not any(path in msg for path in _SILENT_PATHS)
 
 
 def configure_logging(log_level: str = "INFO", json_logs: bool = False) -> None:
@@ -53,12 +56,13 @@ def configure_logging(log_level: str = "INFO", json_logs: bool = False) -> None:
         lg.propagate = True
         lg.setLevel(level)
 
-    # Access log: suppress /healthz probe noise
+    # Access log: suppress /healthz probe and /metrics scrape noise
     access_logger = logging.getLogger("uvicorn.access")
     access_logger.handlers.clear()
+    access_logger.filters.clear()
     access_logger.propagate = True
     access_logger.setLevel(level)
-    access_logger.addFilter(_HealthzFilter())
+    access_logger.addFilter(_SilentPathFilter())
 
     # SQLAlchemy: WARNING suppresses per-query echo (engine echo=False is not enough
     # when the root logger is at INFO — the engine logger still propagates).
