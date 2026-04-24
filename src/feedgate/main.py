@@ -30,9 +30,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from feedgate import retention
-from feedgate.api import register_routers
+from feedgate.api import register_exception_handlers, register_routers
 from feedgate.config import get_settings
-from feedgate.errors import register_exception_handlers
 from feedgate.fetcher import scheduler
 from feedgate.ssrf import SSRFGuardTransport
 

@@ -1,8 +1,8 @@
 """FastAPI HTTP API.
 
 Router registration and the per-request DB session dependency live
-here. The router modules themselves (feeds, entries, health) define
-the actual endpoint handlers.
+here. The router modules themselves (feeds, entries) define the actual
+endpoint handlers. The health endpoint is defined inline below.
 
 The session factory is read from ``app.state.session_factory``, which
 callers (``main.py`` lifespan for production, the test fixtures for
@@ -12,9 +12,30 @@ pytest) must set before the app handles any request.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from http import HTTPStatus
+from typing import cast
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.types import ExceptionHandler
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+_health_router = APIRouter(tags=["health"])
+
+
+@_health_router.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Session / auth dependencies
+# ---------------------------------------------------------------------------
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -47,10 +68,101 @@ async def require_api_key(request: Request) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Exception handlers (previously errors.py)
+# ---------------------------------------------------------------------------
+
+PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
+
+
+def _status_title(status_code: int) -> str:
+    try:
+        return HTTPStatus(status_code).phrase
+    except ValueError:
+        return "Error"
+
+
+def _problem(
+    *,
+    request: Request,
+    status_code: int,
+    title: str,
+    detail: str,
+) -> dict[str, str | int]:
+    return {
+        "type": "about:blank",
+        "title": title,
+        "status": status_code,
+        "detail": detail,
+        "instance": request.url.path,
+    }
+
+
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    title = _status_title(exc.status_code)
+    detail = title if exc.detail is None else str(exc.detail)
+    problem = _problem(
+        request=request,
+        status_code=exc.status_code,
+        title=title,
+        detail=detail,
+    )
+    return JSONResponse(
+        problem,
+        status_code=exc.status_code,
+        media_type=PROBLEM_JSON_MEDIA_TYPE,
+        headers=exc.headers,
+    )
+
+
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    errors = exc.errors()
+    if errors:
+        first = errors[0]
+        loc = first.get("loc", ())
+        msg = first.get("msg", "validation error")
+        detail = f"{loc}: {msg}"
+    else:
+        detail = "validation error"
+
+    status_code = 422
+    title = "Unprocessable Entity"
+    problem = _problem(
+        request=request,
+        status_code=status_code,
+        title=title,
+        detail=detail,
+    )
+    return JSONResponse(
+        problem,
+        status_code=status_code,
+        media_type=PROBLEM_JSON_MEDIA_TYPE,
+    )
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(
+        HTTPException,
+        cast(ExceptionHandler, http_exception_handler),
+    )
+    app.add_exception_handler(
+        RequestValidationError,
+        cast(ExceptionHandler, validation_exception_handler),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Router registration
+# ---------------------------------------------------------------------------
+
+
 def register_routers(app: FastAPI) -> None:
     """Mount all routers onto ``app``."""
-    from feedgate.api import entries, feeds, health
+    from feedgate.api import entries, feeds
 
-    app.include_router(health.router)
+    app.include_router(_health_router)
     app.include_router(feeds.router, dependencies=[Depends(require_api_key)])
     app.include_router(entries.router, dependencies=[Depends(require_api_key)])
