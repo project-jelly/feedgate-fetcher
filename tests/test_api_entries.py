@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.models import Entry, Feed
+from feedgate_fetcher.models import Entry, Feed
 
 
 @pytest_asyncio.fixture

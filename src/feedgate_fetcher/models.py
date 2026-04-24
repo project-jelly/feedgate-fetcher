@@ -1,15 +1,14 @@
 """SQLAlchemy 2.0 ORM models.
 
-Contract lives in ADR 001 (invariants) and docs/spec/feed.md +
-docs/spec/entry.md (columns, indexes, lifecycle). Walking skeleton
-creates all columns the spec requires — logic for status transitions,
-error coding, etc. is deferred per the plan's non-goals, but the
-schema is complete.
+Contract: ADR 001 (invariants), docs/spec/feed.md, docs/spec/entry.md.
+``FeedStatus`` and ``ErrorCode`` live at the bottom of this module as
+StrEnums so comparisons against plain strings work transparently.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     DateTime,
@@ -61,6 +60,12 @@ class Feed(Base):
     # (spec/feed.md). Incremented on every fetch failure, reset to 0
     # on success; drives the active -> broken transition at threshold.
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    # HTTP conditional-request cache validators (internal only, NOT API-exposed
+    # per ADR 003). Stored after each successful 200 response and sent as
+    # If-None-Match / If-Modified-Since on the next fetch to enable 304 support.
+    etag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     entries: Mapped[list[Entry]] = relationship(
         "Entry",
@@ -138,3 +143,32 @@ Index(
     Entry.fetched_at.desc(),
     Entry.id.desc(),
 )
+
+
+class FeedStatus(StrEnum):
+    ACTIVE = "active"
+    BROKEN = "broken"
+    DEAD = "dead"
+
+
+class ErrorCode(StrEnum):
+    # Network / transport
+    DNS = "dns"
+    TCP_REFUSED = "tcp_refused"
+    TLS_ERROR = "tls_error"
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    # HTTP status classes
+    HTTP_4XX = "http_4xx"
+    HTTP_410 = "http_410"
+    HTTP_5XX = "http_5xx"
+    HTTP_ERROR = "http_error"
+    RATE_LIMITED = "rate_limited"
+    # Content / parsing
+    NOT_A_FEED = "not_a_feed"
+    REDIRECT_LOOP = "redirect_loop"
+    TOO_LARGE = "too_large"
+    # SSRF guard rejected the URL (private IP, bad scheme, etc.)
+    BLOCKED = "blocked"
+    # Fallback
+    OTHER = "other"

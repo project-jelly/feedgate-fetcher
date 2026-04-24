@@ -26,11 +26,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate import ssrf
-from feedgate.fetcher.http import fetch_one
-from feedgate.lifecycle import ErrorCode
-from feedgate.models import Feed
-from feedgate.ssrf import (
+from feedgate_fetcher import ssrf
+from feedgate_fetcher.fetcher.http import fetch_one
+from feedgate_fetcher.models import ErrorCode, Feed
+from feedgate_fetcher.ssrf import (
     BlockedURLError,
     SSRFGuardTransport,
     validate_public_url,
@@ -323,12 +322,16 @@ async def test_fetch_one_marks_blocked_when_host_resolves_to_private_ip(
             interval_seconds=fetch_app.state.fetch_interval_seconds,
             user_agent=fetch_app.state.fetch_user_agent,
             max_bytes=fetch_app.state.fetch_max_bytes,
+            max_entries_per_fetch=fetch_app.state.fetch_max_entries_per_fetch,
             max_entries_initial=fetch_app.state.fetch_max_entries_initial,
             total_budget_seconds=fetch_app.state.fetch_total_budget_seconds,
             broken_threshold=fetch_app.state.broken_threshold,
             dead_duration_days=fetch_app.state.dead_duration_days,
             broken_max_backoff_seconds=fetch_app.state.broken_max_backoff_seconds,
             backoff_jitter_ratio=fetch_app.state.backoff_jitter_ratio,
+            entry_frequency_min_interval_seconds=fetch_app.state.entry_frequency_min_interval_seconds,
+            entry_frequency_max_interval_seconds=fetch_app.state.entry_frequency_max_interval_seconds,
+            entry_frequency_factor=fetch_app.state.entry_frequency_factor,
         )
         await session.commit()
 

@@ -10,25 +10,73 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlsplit, urlunsplit
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.api import get_session
-from feedgate.lifecycle import FeedStatus
-from feedgate.models import Feed
-from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
-from feedgate.ssrf import BlockedURLError, validate_public_url
-from feedgate.urlnorm import normalize_url
+from feedgate_fetcher.api import get_session
+from feedgate_fetcher.config import get_settings
+from feedgate_fetcher.models import Feed, FeedStatus
+from feedgate_fetcher.schemas import FeedCreate, FeedResponse, PaginatedFeeds
+from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
-logger = logging.getLogger(__name__)
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+def _to_idna(host: str) -> str:
+    """Convert an IDN host to its punycode form, lowercased on failure."""
+    if not host:
+        return ""
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host.lower()
+
+
+def normalize_url(raw: str) -> str:
+    parts = urlsplit(raw.strip())
+
+    scheme = parts.scheme.lower()
+    host = _to_idna(parts.hostname or "")
+
+    port = parts.port
+    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+        port = None
+
+    netloc = host
+    if parts.username:
+        cred = parts.username
+        if parts.password:
+            cred = f"{cred}:{parts.password}"
+        netloc = f"{cred}@{netloc}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+
+    path = parts.path
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    if path == "/":
+        path = ""
+
+    return urlunsplit((scheme, netloc, path, parts.query, ""))
+
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
+limiter = Limiter(key_func=get_remote_address)
+
+
+def _create_feed_rate_limit() -> str:
+    return get_settings().api_rate_limit
 
 
 def _encode_feed_cursor(feed_id: int) -> str:
@@ -55,11 +103,14 @@ def _decode_feed_cursor(cursor: str) -> int:
     response_model=FeedResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit(_create_feed_rate_limit)
 async def create_feed(
+    request: Request,
     payload: FeedCreate,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
+    del request  # required by slowapi decorator
     url = normalize_url(payload.url)
 
     # SSRF guard: cheap check (scheme + IP literal). Hostname-resolution
@@ -82,7 +133,6 @@ async def create_feed(
     result = await session.execute(stmt)
     new_id = result.scalar_one_or_none()
 
-    # Load the row either way (newly inserted OR pre-existing).
     feed = (await session.execute(select(Feed).where(Feed.url == url))).scalar_one()
     if new_id is None:
         response.status_code = status.HTTP_200_OK
@@ -152,21 +202,9 @@ async def reactivate_feed(
     feed_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
-    """Manually flip any feed back to ``active`` (spec/feed.md).
-
-    The primary use case is moving a ``dead`` feed back into the
-    fetch rotation after an operator has confirmed the upstream is
-    healthy again. Also works on a ``broken`` feed to skip the
-    exponential backoff and force an immediate next tick.
-
-    Semantics:
-      * ``status`` -> ``'active'``
-      * ``consecutive_failures`` -> ``0``
-      * ``last_error_code`` -> ``None``
-      * ``next_fetch_at`` -> ``now`` (picked up by the very next tick)
-      * ``last_successful_fetch_at`` stays unchanged (we have not
-        actually succeeded yet — a subsequent successful fetch will
-        update it)
+    """Manually move any feed back to ``active`` and schedule it for
+    immediate re-fetch. ``last_successful_fetch_at`` is NOT updated —
+    that happens only on a real successful fetch.
     """
     feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
     if feed is None:

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from importlib.metadata import version
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_version = version("feedgate-fetcher")
 
 
 class Settings(BaseSettings):
@@ -42,8 +46,9 @@ class Settings(BaseSettings):
     # per-phase timeouts so it only fires on pathological cases.
     fetch_total_budget_seconds: float = 30.0
     fetch_max_bytes: int = 5 * 1024 * 1024
-    fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
+    fetch_user_agent: str = f"feedgate-fetcher/{_version} (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
+    fetch_max_entries_per_fetch: int = 200
     fetch_concurrency: int = 4
     # Per-host concurrency cap. The global ``fetch_concurrency`` bounds
     # how many feeds we fetch simultaneously across the whole tick;
@@ -79,6 +84,9 @@ class Settings(BaseSettings):
     # an external queue.
     fetch_claim_batch_size: int = 8
     fetch_claim_ttl_seconds: int = 180
+    entry_frequency_min_interval_seconds: int = 300
+    entry_frequency_max_interval_seconds: int = 86400
+    entry_frequency_factor: int = 1
     scheduler_enabled: bool = True
 
     # Retention policy (ADR 004, docs/spec/entry.md).
@@ -90,6 +98,7 @@ class Settings(BaseSettings):
     retention_min_per_feed: int = 20
     retention_sweep_interval_seconds: int = 3600
     retention_enabled: bool = True
+    retention_batch_size: int = 1000
 
     # Feed lifecycle state machine (docs/spec/feed.md).
     # active -> broken after `broken_threshold` consecutive failures.
@@ -108,6 +117,11 @@ class Settings(BaseSettings):
     api_entries_default_limit: int = 50
     api_entries_max_limit: int = 200
     api_feeds_max_limit: int = 200
+
+    api_key: str = ""  # empty = no auth
+    api_rate_limit: str = "60/minute"  # applied to POST /v1/feeds per IP
+    log_level: str = "INFO"
+    log_json: bool = False
 
 
 def get_settings() -> Settings:

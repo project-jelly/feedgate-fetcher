@@ -86,7 +86,7 @@ flowchart LR
 |---|---|---|---|---|
 | A1 거대 응답 | — | Body cap 5MB streaming | — | ✅ |
 | A2 압축 폭탄 | — | Body cap on **decompressed bytes** | — | ✅ |
-| A3 Slow Loris | — | wall-clock 30s + read 10s | — | ❌ wall-clock 미구현 |
+| A3 Slow Loris | — | wall-clock 30s + read 15s | — | ✅ `test_fetch_one_total_budget_kills_slow_response` |
 | A4 첫 fetch 1만 entries | — | max_entries_initial=50 | — | ✅ |
 | A5 redirect loop | — | redirect cap (httpx 기본 20) | — | ⚠️ 명시적 설정 없음 |
 | A6 TLS 무효 | — | TLS verify=True | broken → dead | ✅ |
@@ -94,18 +94,18 @@ flowchart LR
 | A8 영구 4xx | — | — | broken → dead 후 주 1회 | ✅ |
 | B1 동시 timeout | — | fetch_concurrency=4 | 다음 tick 정상 | ⚠️ stall 시간 |
 | B2 thundering herd | — | — | ±25% jitter | ✅ |
-| B3 동일 호스트 폭격 | per-host throttle | — | 429 처리 | ❌ 미구현 |
-| B4 429 폭탄 | per-host throttle | — | Retry-After 존중 | ✅ Retry-After만 |
+| B3 동일 호스트 폭격 | per-host semaphore | — | 429 처리 | ✅ `test_per_host_throttle_serializes_same_host_feeds` |
+| B4 429 폭탄 | per-host semaphore | — | Retry-After 존중 | ✅ |
 | C1 Postgres pool 고갈 | — | pool_size 튜닝 | — | ⚠️ 기본값 |
 | C2 retention 지연 | — | cursor batch | — | ⚠️ 미구현 |
 | C3 tick 예외 | — | run() try/except | — | ✅ |
 | C4 워커 OOM | — | — | Lease TTL 재배정 | ✅ |
-| C5 rolling deploy | — | graceful drain | Lease TTL 재배정 | ❌ drain 미구현 |
+| C5 rolling deploy | — | graceful drain | Lease TTL 재배정 | ✅ `test_drain_waits_for_truly_in_flight_fetch_to_complete` |
 | C6 DB 단절 | — | — | next tick 재시도 | ⚠️ 로그 폭주 |
-| D1 AWS metadata SSRF | **호스트 IP 검증** | — | — | ❌ 미구현 |
-| D2 DB 포트 정찰 | **호스트 IP 검증** | not_a_feed | — | ❌ 미구현 |
-| D3 file:// | scheme 화이트리스트 | — | — | ✅ |
-| D4 redirect SSRF | follow_redirects 수동 검증 | — | — | ❌ 미구현 |
+| D1 AWS metadata SSRF | **호스트 IP 검증** | — | — | ✅ `test_post_feed_rejects_blocked_url` |
+| D2 DB 포트 정찰 | **호스트 IP 검증** | not_a_feed | — | ✅ `test_validate_blocks_dns_rebinding_to_private_ip` |
+| D3 file:// | scheme 화이트리스트 | — | — | ✅ `test_validate_blocks_unsupported_scheme` |
+| D4 redirect SSRF | SSRFGuardTransport | — | — | ✅ `test_transport_guard_blocks_redirect_target` |
 | D5 API 폭주 | API rate limit | — | — | ❌ 미구현 |
 | D6 멱등 POST | — | — | upsert idempotent | ✅ |
 
@@ -186,7 +186,6 @@ flowchart TD
     M -->|아니오| J
     M -->|예| N[parse_feed]
 
-    N -->|예외| F8[parse_error]
     N -->|성공| O{첫 fetch이고<br/>entries > 50?}
     O -->|예| O1[entries[:50] truncate]
     O -->|아니오| O2
@@ -198,7 +197,7 @@ flowchart TD
     Q1 --> R[next_fetch_at 재계산<br/>active: now+60s<br/>broken: backoff+jitter]
     H1 --> P
 
-    F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8 & EB --> S[fail += 1<br/>last_error_code 기록]
+    F1 & F2 & F3 & F4 & F5 & F6 & F7 & EB --> S[fail += 1<br/>last_error_code 기록]
     S --> T{fail >= 3?}
     T -->|예 + active| T1[broken 전이]
     T -->|아니오| U
@@ -223,10 +222,10 @@ flowchart TD
 
 | 노드 | 방어 위협 | 비고 |
 |---|---|---|
-| `AA` per-host throttle | B3, B4 | ❌ 미구현 |
-| `BA/BC` 조건부 헤더 | A7 (간접) | ⚠️ DB 컬럼만 있음 |
-| `C` wall-clock + 세분 timeout | A3, A5, B1 | ⚠️ wall-clock 미구현 |
-| `EA` redirect SSRF 재검증 | D4 | ❌ 미구현 |
+| `AA` per-host throttle | B3, B4 | ✅ `test_per_host_throttle_serializes_same_host_feeds` |
+| `BA/BC` 조건부 헤더 | A7 (간접) | ✅ `test_fetch_one_sends_if_none_match_on_second_fetch` |
+| `C` wall-clock + 세분 timeout | A3, A5, B1 | ✅ `test_fetch_one_total_budget_kills_slow_response` |
+| `EA` redirect SSRF 재검증 | D4 | ✅ `test_transport_guard_blocks_redirect_target` |
 | `I` Content-Type 화이트리스트 | A1 (HTML 폭격), D2 | ✅ |
 | `K` body cap 5MB | A1, A2 | ✅ |
 | `O` initial entries cap | A4 | ✅ |
@@ -318,23 +317,13 @@ stateDiagram-v2
 - 영구 죽은 도메인(A8) → 1주일 안에 dead로 격리, 이후 무시
 - recovery 자동성: probe 성공 시 자동 active 복귀
 
-### 3.5 per-host throttle 결정 (PR #N 예정)
+### 3.5 per-host 동시성 제어 (구현됨)
 
-```mermaid
-flowchart LR
-    A[fetch_one 진입] --> B[urlparse hostname]
-    B --> C{host_limiter[host]<br/>슬롯 acquire 가능?}
-    C -->|예| D[즉시 진행]
-    C -->|아니오| E[await acquire<br/>최대 wait_seconds]
-    E --> C
-    D --> F[HTTP GET]
-    F --> G[release slot]
+`tick_once` 내에서 호스트별 `asyncio.Semaphore(per_host_concurrency)`를 사용해 같은 호스트의 피드를 직렬화한다.
+기본값 `FEEDGATE_FETCH_PER_HOST_CONCURRENCY=1` → 동일 호스트 동시 fetch 1개.
 
-    note1[medium.com 100개 피드 등록 →<br/>RPS 1 제한 → 100초에 걸쳐 분산]
-    style C fill:#fef,stroke:#c0c
-```
-
-**방어 포인트**: B3 (호스트 폭격), B4 (429 폭탄을 미연 방지). 미구현.
+**방어 포인트**: B3 (호스트 폭격), B4 (429 폭탄 사전 방지)
+**TC**: `test_per_host_throttle_serializes_same_host_feeds`, `test_per_host_throttle_allows_distinct_hosts_in_parallel`
 
 ### 3.6 Graceful shutdown drain
 
@@ -412,9 +401,9 @@ flowchart TB
 |---|---|
 | User → LB | API rate limit (❌ 미구현) |
 | LB → API | k8s LB 자체 |
-| API → PG (등록) | SSRF 검증 (❌), 멱등 (✅), URL 정규화 (✅) |
+| API → PG (등록) | SSRF 검증 (✅), 멱등 (✅), URL 정규화 (✅) |
 | PG → Worker (claim) | SKIP LOCKED + lease (✅) |
-| Worker → upstream | host throttle (❌), timeout (⚠️), body cap (✅) |
+| Worker → upstream | host throttle (✅), timeout (✅), body cap (✅) |
 | upstream → Worker | content-type (✅), Retry-After (✅) |
 | Worker → PG (upsert) | ON CONFLICT no-op (✅), 풀 튜닝 (⚠️) |
 | CronJob → PG | cursor batch (❌) |
@@ -425,51 +414,47 @@ flowchart TB
 
 | 우선순위 | 항목 | 위협 ID | 방어 Tier | PR 사이즈 |
 |---|---|---|---|---|
-| **P0 보안** | SSRF 호스트 IP 검증 | D1, D2, D4 | T1 Prevent | S |
-| **P1 운영** | per-host throttle | B3, B4 | T1 Prevent | M |
-| **P1 운영** | wall-clock 전체 timeout + 세분 httpx Timeout | A3, A5, B1 | T2 Contain | XS |
-| **P1 운영** | graceful shutdown drain | C5 | T2 Contain | S |
 | **P1 운영** | Postgres 풀 튜닝 + pool_pre_ping | C1, C6 | T2 Contain | XS |
-| **P2 비용** | ETag / If-Modified-Since 조건부 GET | A7, B1 (간접) | T2 Contain | XS |
 | **P2 비용** | executemany batch upsert | A7 | T2 Contain | S |
 | **P2 운영** | retention cursor batch | C2 | T2 Contain | M |
 | **P2 운영** | API rate limit (slowapi/limits) | D5 | T1 Prevent | S |
-| **P3 가시성** | Prometheus /metrics | (전체) | — | M |
 | **P3 가시성** | 구조화 로깅 (structlog/json) | (전체) | — | S |
 | **P3 운영** | DB 단절 백오프 (로그 폭주 방지) | C6 | T3 Recover | XS |
 | **P4 운영** | AIMD 동적 fetch_concurrency | B1 | T3 Recover | M |
-
-**최소 운영 가능 = P0 + P1** (예상 작업 1.5일).
 
 ## 6. 메트릭 (Tier 3 Recover의 가시성)
 
 위 방어선이 실제로 작동하는지 확인하려면 다음 지표가 필요하다 (Prometheus 노출 예정):
 
+현재 구현된 메트릭 (`src/feedgate/metrics.py`):
+
 ```
-fetch_outcome_total{code="success"|"timeout"|"http_4xx"|"http_5xx"|"rate_limited"|"not_a_feed"|"too_large"|"connection"|"tls_error"|"parse_error"|"redirect_blocked"}
-fetch_duration_seconds_bucket{le="..."}
-fetch_body_bytes_bucket{le="..."}
-host_throttle_wait_seconds_bucket{host="..."}
+# fetch RED
+feedgate_fetch_total{result="success"|"not_modified"|"rate_limited"|"error"}
+feedgate_fetch_error_total{error_code="dns"|"tcp_refused"|"tls_error"|"timeout"|"http_4xx"|...}
+feedgate_fetch_duration_seconds{result=...}
 
-feed_state_count{state="active"|"broken"|"dead"}
-feed_consecutive_failures_bucket{le="..."}
+# API RED
+feedgate_api_requests_total{method, path, status_code}
+feedgate_api_request_duration_seconds{method, path}
 
-claim_batch_size
-claim_lease_recoveries_total      # lease TTL로 재배정된 횟수
+# 상태 게이지 (15s 주기 수집)
+feedgate_feeds_total{status="active"|"broken"|"dead"}
+feedgate_entries_total
+feedgate_scheduler_due_feeds
 
-entries_inserted_total
-entries_updated_total              # WHERE IS DISTINCT FROM 통과
-entries_unchanged_total            # ON CONFLICT no-op
+# DB 풀
+feedgate_db_pool_checkedout
+feedgate_db_pool_overflow
 
-ssrf_blocked_total{phase="register"|"redirect"}
-api_rate_limited_total{path="..."}
-db_pool_in_use, db_pool_size
+# retention
+feedgate_retention_deleted_total
 ```
 
 **alerting 예시**:
-- `rate(fetch_outcome_total{code="timeout"}[5m]) > 0.3 * rate(fetch_outcome_total[5m])` → upstream 광역 장애
-- `feed_state_count{state="dead"}` 급증 → 시스템 상 결함 의심
-- `db_pool_in_use / db_pool_size > 0.9` → 풀 곧 고갈
+- `rate(feedgate_fetch_total{result="error"}[5m]) / rate(feedgate_fetch_total[5m]) > 0.3` → upstream 광역 장애
+- `feedgate_feeds_total{status="dead"}` 급증 → 시스템 상 결함 의심
+- `feedgate_db_pool_checkedout / (feedgate_db_pool_checkedout + feedgate_db_pool_overflow) > 0.9` → 풀 곧 고갈
 
 ## 7. 전제 (Assumptions)
 

@@ -21,6 +21,9 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -29,9 +32,10 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.postgres import PostgresContainer
 
-from feedgate.api import register_routers
-from feedgate.config import Settings
-from feedgate.db import make_engine, make_session_factory
+from feedgate_fetcher.api import feeds as feeds_api
+from feedgate_fetcher.api import register_routers
+from feedgate_fetcher.config import Settings
+from feedgate_fetcher.main import make_engine, make_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
@@ -122,7 +126,11 @@ async def api_app(
     """
     settings = Settings()
     app = FastAPI()
+    app.state.limiter = feeds_api.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = async_session_factory
+    app.state.api_key = ""  # no auth in tests by default
     app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit
@@ -159,6 +167,7 @@ async def fetch_app(
     settings = Settings()
     app = FastAPI()
     app.state.session_factory = async_session_factory
+    app.state.api_key = ""  # no auth in tests by default
     app.state.http_client = AsyncClient()
     app.state.fetch_interval_seconds = 60
     app.state.fetch_user_agent = "feedgate-fetcher/test"
@@ -167,6 +176,7 @@ async def fetch_app(
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
     app.state.fetch_max_bytes = settings.fetch_max_bytes
+    app.state.fetch_max_entries_per_fetch = settings.fetch_max_entries_per_fetch
     app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
     app.state.fetch_total_budget_seconds = settings.fetch_total_budget_seconds
     app.state.broken_threshold = settings.broken_threshold
@@ -174,6 +184,9 @@ async def fetch_app(
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
     app.state.backoff_jitter_ratio = settings.backoff_jitter_ratio
     app.state.dead_probe_interval_days = settings.dead_probe_interval_days
+    app.state.entry_frequency_min_interval_seconds = settings.entry_frequency_min_interval_seconds
+    app.state.entry_frequency_max_interval_seconds = settings.entry_frequency_max_interval_seconds
+    app.state.entry_frequency_factor = settings.entry_frequency_factor
     try:
         yield app
     finally:

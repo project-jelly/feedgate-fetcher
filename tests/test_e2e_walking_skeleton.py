@@ -65,8 +65,8 @@ async def test_walking_skeleton_happy_path(
     # Imports live inside the test body so earlier-Phase failures surface
     # as ImportError on the specific missing symbol rather than a pytest
     # collection error on the whole file.
-    from feedgate.fetcher import scheduler
-    from feedgate.main import create_app
+    from feedgate_fetcher.fetcher import scheduler
+    from feedgate_fetcher.main import create_app
 
     # Wire the app to the test database and disable the background
     # scheduler task — we will drive ticks manually to avoid racing with

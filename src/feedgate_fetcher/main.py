@@ -22,16 +22,57 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-from feedgate import retention
-from feedgate.api import register_routers
-from feedgate.config import get_settings
-from feedgate.db import make_engine, make_session_factory
-from feedgate.errors import register_exception_handlers
-from feedgate.fetcher import scheduler
-from feedgate.ssrf import SSRFGuardTransport
+from feedgate_fetcher import metrics as _metrics
+from feedgate_fetcher.api import register_exception_handlers, register_routers
+from feedgate_fetcher.config import get_settings
+from feedgate_fetcher.fetcher import retention, scheduler
+from feedgate_fetcher.logging_config import configure_logging
+from feedgate_fetcher.ssrf import SSRFGuardTransport
 
 logger = logging.getLogger(__name__)
+
+
+def make_engine(
+    database_url: str,
+    *,
+    pool_size: int = 8,
+    max_overflow: int = 4,
+    pool_timeout: int = 30,
+    pool_recycle: int = 1800,
+) -> AsyncEngine:
+    """Create an async engine. URL must use the asyncpg driver."""
+    return create_async_engine(
+        database_url,
+        future=True,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+    )
+
+
+def make_session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 
 
 async def _drain_background_task(
@@ -82,6 +123,8 @@ def create_app() -> FastAPI:
     when enabled and (b) cleaning up resources at shutdown.
     """
     settings = get_settings()
+    configure_logging(settings.log_level, settings.log_json)
+    limiter = Limiter(key_func=get_remote_address, default_limits=[settings.api_rate_limit])
     engine = make_engine(
         settings.database_url,
         pool_size=settings.db_pool_size,
@@ -129,6 +172,10 @@ def create_app() -> FastAPI:
             )
         else:
             logger.info("retention disabled via FEEDGATE_RETENTION_ENABLED=false")
+        collector_stop = asyncio.Event()
+        collector_task = asyncio.create_task(
+            _metrics.run_collector(session_factory, engine, stop_event=collector_stop)
+        )
         try:
             yield
         finally:
@@ -146,10 +193,19 @@ def create_app() -> FastAPI:
                 name="retention",
                 drain_seconds=drain_budget,
             )
+            await _drain_background_task(
+                collector_task,
+                collector_stop,
+                name="metrics_collector",
+                drain_seconds=5.0,
+            )
             await http_client.aclose()
             await engine.dispose()
 
     app = FastAPI(title="feedgate-fetcher", lifespan=lifespan)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = session_factory
     app.state.http_client = http_client
     app.state.fetch_interval_seconds = settings.fetch_interval_seconds
@@ -157,14 +213,19 @@ def create_app() -> FastAPI:
     app.state.fetch_max_bytes = settings.fetch_max_bytes
     app.state.fetch_total_budget_seconds = settings.fetch_total_budget_seconds
     app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
+    app.state.fetch_max_entries_per_fetch = settings.fetch_max_entries_per_fetch
     app.state.fetch_concurrency = settings.fetch_concurrency
     app.state.fetch_per_host_concurrency = settings.fetch_per_host_concurrency
     app.state.shutdown_drain_seconds = settings.shutdown_drain_seconds
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
+    app.state.entry_frequency_min_interval_seconds = settings.entry_frequency_min_interval_seconds
+    app.state.entry_frequency_max_interval_seconds = settings.entry_frequency_max_interval_seconds
+    app.state.entry_frequency_factor = settings.entry_frequency_factor
     app.state.retention_days = settings.retention_days
     app.state.retention_min_per_feed = settings.retention_min_per_feed
     app.state.retention_sweep_interval_seconds = settings.retention_sweep_interval_seconds
+    app.state.retention_batch_size = settings.retention_batch_size
     app.state.broken_threshold = settings.broken_threshold
     app.state.dead_duration_days = settings.dead_duration_days
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
@@ -174,9 +235,10 @@ def create_app() -> FastAPI:
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit
     app.state.api_feeds_max_limit = settings.api_feeds_max_limit
+    app.state.api_key = settings.api_key
     register_routers(app)
     register_exception_handlers(app)
     return app
 
 
-# Run under uvicorn with:  uvicorn feedgate.main:create_app --factory
+# Run under uvicorn with:  uvicorn feedgate_fetcher.main:create_app --factory

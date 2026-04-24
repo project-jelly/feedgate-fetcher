@@ -197,10 +197,5 @@ additive이며 breaking change가 아니다.
 
 ## 미해결
 
-- 인증·접근 제어 — 후속 ADR.
-- 레이트 리밋, `feed_ids` 최대 길이, `limit` 최대값 — spec.
-- 메트릭 엔드포인트 경로·포맷 — spec.
-- 구체 에러 코드 목록과 HTTP 상태 매핑 — spec.
-- `DELETE /v1/feeds/{id}`의 non-existent id 응답 코드 — spec.
-- 편집된 엔트리의 "보조 동기화" 쿼리 파라미터가 필요한지 — spec에서 결정,
-  필요해지면 additive 추가.
+- 레이트 리밋 구체 수치 — spec.
+- 편집된 엔트리의 "보조 동기화" 쿼리 파라미터가 필요한지 — 필요해지면 additive 추가.

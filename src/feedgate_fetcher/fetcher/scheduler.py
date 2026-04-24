@@ -14,9 +14,8 @@
     semantics.
 
   * ``run(app, stop_event)`` — the background loop that drives
-    ``tick_once`` on a timer. Intentionally thin and TDD-exempt per
-    the plan; its correctness is covered by tick_once integration
-    tests and F2 (walking-skeleton E2E).
+    ``tick_once`` on a fixed interval. Stops cleanly when
+    ``stop_event`` is set.
 
 The app reads its state from ``app.state``:
   * ``session_factory`` (sqlalchemy async_sessionmaker)
@@ -29,19 +28,18 @@ The app reads its state from ``app.state``:
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
+import structlog
 from fastapi import FastAPI
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.fetcher.http import fetch_one
-from feedgate.lifecycle import FeedStatus
-from feedgate.models import Feed
+from feedgate_fetcher.fetcher.http import fetch_one
+from feedgate_fetcher.models import Feed, FeedStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 def _host_key(url: str) -> str:
@@ -69,12 +67,16 @@ async def _process_feed(
     interval = app.state.fetch_interval_seconds
     ua = app.state.fetch_user_agent
     max_bytes = app.state.fetch_max_bytes
+    max_entries_per_fetch = app.state.fetch_max_entries_per_fetch
     max_entries_initial = app.state.fetch_max_entries_initial
     total_budget = app.state.fetch_total_budget_seconds
     broken_threshold = app.state.broken_threshold
     dead_duration_days = app.state.dead_duration_days
     broken_max_backoff_seconds = app.state.broken_max_backoff_seconds
     backoff_jitter_ratio = app.state.backoff_jitter_ratio
+    entry_frequency_min_interval_seconds = app.state.entry_frequency_min_interval_seconds
+    entry_frequency_max_interval_seconds = app.state.entry_frequency_max_interval_seconds
+    entry_frequency_factor = app.state.entry_frequency_factor
 
     async with sem, sf() as session:
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
@@ -100,12 +102,16 @@ async def _process_feed(
                     interval_seconds=interval,
                     user_agent=ua,
                     max_bytes=max_bytes,
+                    max_entries_per_fetch=max_entries_per_fetch,
                     max_entries_initial=max_entries_initial,
                     total_budget_seconds=total_budget,
                     broken_threshold=broken_threshold,
                     dead_duration_days=dead_duration_days,
                     broken_max_backoff_seconds=broken_max_backoff_seconds,
                     backoff_jitter_ratio=backoff_jitter_ratio,
+                    entry_frequency_min_interval_seconds=entry_frequency_min_interval_seconds,
+                    entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
+                    entry_frequency_factor=entry_frequency_factor,
                 )
             await session.commit()
         except Exception:
@@ -217,19 +223,27 @@ async def run(
 ) -> None:
     """Background loop that calls ``tick_once`` every interval.
 
-    TDD-exempt per WP 4.3 — the loop body is intentionally ~10 LOC and
-    its correctness is covered by the integration tests of ``tick_once``
-    and by F2 (walking-skeleton E2E). The stop_event parameter is a
-    plain ``asyncio.Event``; ``None`` means "run until cancelled".
+    Stops when ``stop_event`` is set. Exceptions from ``tick_once`` are
+    logged and swallowed so a single bad tick cannot kill the loop.
+    Consecutive failures trigger exponential backoff up to 300s.
     """
     interval = app.state.fetch_interval_seconds
     stop = stop_event or asyncio.Event()
+    consecutive_errors = 0
     while not stop.is_set():
         try:
             await tick_once(app)
+            consecutive_errors = 0
         except Exception:
+            consecutive_errors += 1
             logger.exception("scheduler tick raised; continuing")
+        timeout = interval
+        if consecutive_errors > 0:
+            timeout = min(
+                interval * (2 ** min(consecutive_errors - 1, 5)),
+                300,
+            )
         try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
+            await asyncio.wait_for(stop.wait(), timeout=timeout)
         except TimeoutError:
             continue

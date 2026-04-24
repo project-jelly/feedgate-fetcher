@@ -22,9 +22,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.api import get_session
-from feedgate.models import Entry
-from feedgate.schemas import EntryResponse, PaginatedEntries
+from feedgate_fetcher.api import get_session
+from feedgate_fetcher.models import Entry
+from feedgate_fetcher.schemas import EntryResponse, PaginatedEntries
 
 router = APIRouter(prefix="/v1/entries", tags=["entries"])
 
@@ -102,7 +102,7 @@ async def list_entries(
                     and_(Entry.published_at.is_(None), Entry.id < cur_id),
                     Entry.published_at.is_not(
                         None
-                    ),  # DESC NULLS FIRST에서 non-null은 모두 이후 구간
+                    ),  # non-null entries all sort before NULL under DESC NULLS FIRST
                 )
             )
         else:

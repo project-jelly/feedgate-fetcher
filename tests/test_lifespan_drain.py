@@ -31,9 +31,9 @@ from httpx import Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.fetcher import scheduler
-from feedgate.main import _drain_background_task
-from feedgate.models import Feed
+from feedgate_fetcher.fetcher import scheduler
+from feedgate_fetcher.main import _drain_background_task
+from feedgate_fetcher.models import Feed
 
 # ---------------------------------------------------------------------------
 # Unit tests on _drain_background_task — no scheduler, no DB.

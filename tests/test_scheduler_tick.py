@@ -14,13 +14,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import respx
 from fastapi import FastAPI
-from httpx import Request, Response
+from httpx import AsyncClient, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.fetcher import scheduler
-from feedgate.fetcher.scheduler import _claim_due_feeds
-from feedgate.models import Entry, Feed
+from feedgate_fetcher.config import Settings
+from feedgate_fetcher.fetcher import scheduler
+from feedgate_fetcher.fetcher.scheduler import _claim_due_feeds
+from feedgate_fetcher.main import make_engine, make_session_factory
+from feedgate_fetcher.models import Entry, Feed
 
 
 def _atom_with(guid: str, title: str) -> bytes:
@@ -108,6 +110,87 @@ async def test_tick_once_fetches_all_active_feeds(
     inactive = by_url[inactive_url]
     assert inactive.last_successful_fetch_at is None
     assert inactive.status == "dead"
+
+
+@pytest.mark.asyncio
+async def test_pool_saturation_does_not_raise_for_concurrent_fetches(
+    database_url: str,
+    truncate_tables: None,
+    respx_mock: respx.Router,
+) -> None:
+    """With a tiny DB pool, concurrent fetch workers should queue,
+    not fail under connection pressure."""
+    settings = Settings()
+    engine = make_engine(database_url, pool_size=2, max_overflow=0)
+    sf = make_session_factory(engine)
+    app = FastAPI()
+    app.state.session_factory = sf
+    app.state.http_client = AsyncClient()
+    app.state.fetch_interval_seconds = 60
+    app.state.fetch_user_agent = "feedgate-fetcher/test"
+    app.state.fetch_concurrency = 4
+    app.state.fetch_per_host_concurrency = settings.fetch_per_host_concurrency
+    app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
+    app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
+    app.state.fetch_max_bytes = settings.fetch_max_bytes
+    app.state.fetch_max_entries_per_fetch = settings.fetch_max_entries_per_fetch
+    app.state.fetch_max_entries_initial = settings.fetch_max_entries_initial
+    app.state.fetch_total_budget_seconds = settings.fetch_total_budget_seconds
+    app.state.broken_threshold = settings.broken_threshold
+    app.state.dead_duration_days = settings.dead_duration_days
+    app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
+    app.state.backoff_jitter_ratio = settings.backoff_jitter_ratio
+    app.state.dead_probe_interval_days = settings.dead_probe_interval_days
+    app.state.entry_frequency_min_interval_seconds = settings.entry_frequency_min_interval_seconds
+    app.state.entry_frequency_max_interval_seconds = settings.entry_frequency_max_interval_seconds
+    app.state.entry_frequency_factor = settings.entry_frequency_factor
+
+    feed_urls = [
+        "http://pool-a.test/feed",
+        "http://pool-b.test/feed",
+        "http://pool-c.test/feed",
+        "http://pool-d.test/feed",
+    ]
+    try:
+        async with sf() as session:
+            for url in feed_urls:
+                session.add(Feed(url=url, effective_url=url))
+            await session.commit()
+
+        for url in feed_urls:
+            guid = url + "/post-1"
+            respx_mock.get(url).mock(
+                return_value=Response(
+                    200,
+                    content=_atom_with(guid, f"post for {url}"),
+                    headers={"Content-Type": "application/atom+xml"},
+                )
+            )
+
+        await scheduler.tick_once(app)
+
+        async with sf() as session:
+            entry_count_total = int(
+                (await session.execute(select(func.count()).select_from(Entry))).scalar_one()
+            )
+            assert entry_count_total == 4
+
+            result = await session.execute(
+                select(
+                    Feed.url,
+                    Feed.last_successful_fetch_at,
+                    Feed.last_error_code,
+                )
+            )
+            by_url = {row.url: row for row in result}
+
+        for url in feed_urls:
+            row = by_url[url]
+            assert row.last_successful_fetch_at is not None
+            assert row.last_error_code is None
+    finally:
+        await app.state.http_client.aclose()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -584,6 +667,35 @@ async def test_scheduler_run_exits_cleanly_when_stop_event_is_set(
     assert task.done()
     assert not task.cancelled()
     assert task.exception() is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_run_backs_off_on_repeated_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated loop errors should apply exponential backoff so the
+    scheduler does not spin and flood logs."""
+    app = FastAPI()
+    app.state.fetch_interval_seconds = 0.05
+    calls = 0
+
+    async def always_fail(_app: FastAPI) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("db disconnected")
+
+    monkeypatch.setattr(scheduler, "tick_once", always_fail)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler.run(app, stop_event=stop))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.3)
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    # Immediate first tick, then 50ms, 100ms, 200ms backoff...
+    assert calls <= 3
 
 
 @pytest.mark.asyncio

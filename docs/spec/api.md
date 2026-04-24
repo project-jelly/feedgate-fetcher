@@ -15,7 +15,7 @@
 | Content-Type (request) | `application/json` |
 | Content-Type (response 2xx) | `application/json` |
 | Content-Type (response 4xx/5xx) | `application/problem+json` |
-| Authentication | 현재 없음 (후속 ADR에서 결정) |
+| Authentication | 선택적 — `X-Api-Key` 헤더, `FEEDGATE_API_KEY` 환경변수; 빈 값이면 비활성 |
 | Versioning | URL prefix `/v1/`; breaking change는 `/v2/`로 분리 (ADR 002) |
 
 현재 구현 컴포넌트 관계:
@@ -24,16 +24,18 @@
 +---------+      HTTP       +---------------------------+
 | Client  |  ----------->   | FastAPI App               |
 +---------+                 |                           |
-                            |  /healthz  (health.py)   |
-                            |  /v1/feeds (feeds.py)    |
+                            |  /healthz                 |
+                            |  /v1/feeds  (feeds.py)   |
                             |  /v1/entries (entries.py)|
+                            |  /metrics                 |
                             +-------------+-------------+
                                           |
-                                          | 예외 핸들러
+                                          | 예외 핸들러 (api/__init__.py)
                                           v
                                 +---------------------+
                                 | RFC 7807 Envelope   |
-                                | (errors.py)         |
+                                | application/problem |
+                                | +json               |
                                 +---------------------+
                                           |
                                           | 응답 직렬화
@@ -60,7 +62,7 @@
 
 ## 에러 응답 형식
 
-에러 본문은 RFC 7807 Problem Details envelope(`application/problem+json`)를 사용한다. 구현 기준은 `src/feedgate/errors.py`이며, ADR 002의 "에러 응답 형식" 절이 계약의 기준 문서다. 모든 `HTTPException`/요청 검증 에러는 아래 구조로 직렬화된다.
+에러 본문은 RFC 7807 Problem Details envelope(`application/problem+json`)를 사용한다. 구현은 `src/feedgate/api/__init__.py`의 `http_exception_handler` / `validation_exception_handler`이며, ADR 002의 "에러 응답 형식" 절이 계약의 기준 문서다. 모든 `HTTPException`/요청 검증 에러는 아래 구조로 직렬화된다.
 
 ```json
 {
@@ -126,7 +128,7 @@
 
 ```text
 raw url
-  -> normalize_url(urlnorm.py)
+  -> normalize_url (api/feeds.py)
   -> validate_public_url(resolve=False)
   -> INSERT ... ON CONFLICT(url) DO NOTHING
 ```
@@ -371,8 +373,6 @@ API 컨테이너 실행 시 FastAPI가 기계 판독용 OpenAPI JSON을 `/openap
 
 ## 미해결
 
-- 인증/접근 제어 (후속 ADR)
 - Rate limit 구체 수치
-- 메트릭 엔드포인트 경로/포맷
 - 편집된 엔트리의 보조 동기화 파라미터 필요 여부
 

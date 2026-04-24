@@ -35,11 +35,17 @@ COPY alembic.ini ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# 4) Drop root — run as a non-privileged user.
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --no-create-home appuser \
+    && chown -R appuser:appgroup /app
+USER appuser
+
 EXPOSE 8000
 
 # Default command runs the API server. The worker service overrides
 # nothing — it uses the same uvicorn entry point but flips
 # `FEEDGATE_SCHEDULER_ENABLED=true` so the lifespan starts the
 # background scheduler task.
-CMD ["uv", "run", "--no-sync", "uvicorn", "feedgate.main:create_app", \
+CMD ["uv", "run", "--no-sync", "uvicorn", "feedgate_fetcher.main:create_app", \
      "--factory", "--host", "0.0.0.0", "--port", "8000"]

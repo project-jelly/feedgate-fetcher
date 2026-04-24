@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 
-from feedgate.errors import PROBLEM_JSON_MEDIA_TYPE, register_exception_handlers
+from feedgate_fetcher.api import PROBLEM_JSON_MEDIA_TYPE, register_exception_handlers
 
 
 @pytest.fixture(autouse=True)
