@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 
 from prometheus_client import Counter, Gauge, Histogram
@@ -9,6 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from feedgate.models import Entry, Feed, FeedStatus
+
+logger = logging.getLogger(__name__)
 
 # ── RED: fetch pipeline ──────────────────────────────────────────────────────
 FETCH_TOTAL = Counter(
@@ -122,7 +125,7 @@ async def run_collector(
         try:
             await _collect_state(session_factory, engine)
         except Exception:
-            pass
+            logger.debug("metrics collection failed", exc_info=True)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
         except TimeoutError:

@@ -102,7 +102,7 @@ async def list_entries(
                     and_(Entry.published_at.is_(None), Entry.id < cur_id),
                     Entry.published_at.is_not(
                         None
-                    ),  # DESC NULLS FIRST에서 non-null은 모두 이후 구간
+                    ),  # non-null entries all sort before NULL under DESC NULLS FIRST
                 )
             )
         else:

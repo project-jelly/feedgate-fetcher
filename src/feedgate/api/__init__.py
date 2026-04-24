@@ -73,7 +73,7 @@ async def require_api_key(request: Request) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exception handlers (previously errors.py)
+# Exception handlers
 # ---------------------------------------------------------------------------
 
 PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
@@ -177,7 +177,6 @@ def _add_metrics_middleware(app: FastAPI) -> None:
             route = request.scope.get("route")
             path = route.path if route else request.url.path
             from feedgate.metrics import API_DURATION, API_REQUESTS_TOTAL
-
             API_REQUESTS_TOTAL.labels(
                 method=request.method,
                 path=path,
@@ -195,7 +194,7 @@ def register_routers(app: FastAPI) -> None:
 
     _add_metrics_middleware(app)
 
-    @app.get("/metrics", include_in_schema=False)
+    @app.get("/metrics", include_in_schema=False, dependencies=[Depends(require_api_key)])
     async def metrics_endpoint() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 

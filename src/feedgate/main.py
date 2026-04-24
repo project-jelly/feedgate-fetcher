@@ -52,6 +52,7 @@ def make_engine(
         database_url,
         future=True,
         echo=False,
+        pool_pre_ping=True,
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_timeout=pool_timeout,

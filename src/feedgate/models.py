@@ -1,15 +1,14 @@
 """SQLAlchemy 2.0 ORM models.
 
-Contract lives in ADR 001 (invariants) and docs/spec/feed.md +
-docs/spec/entry.md (columns, indexes, lifecycle). Walking skeleton
-creates all columns the spec requires — logic for status transitions,
-error coding, etc. is deferred per the plan's non-goals, but the
-schema is complete.
+Contract: ADR 001 (invariants), docs/spec/feed.md, docs/spec/entry.md.
+``FeedStatus`` and ``ErrorCode`` live at the bottom of this module as
+StrEnums so comparisons against plain strings work transparently.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     DateTime,
@@ -146,23 +145,6 @@ Index(
 )
 
 
-# ---------------------------------------------------------------------------
-# Feed lifecycle constants
-#
-# ``FeedStatus`` and ``ErrorCode`` are the canonical string values used
-# across the ORM, API schemas, and fetcher. They are ``StrEnum`` so that
-# comparisons against plain strings still work (``FeedStatus.ACTIVE ==
-# "active"`` is ``True``) and JSON serialization is the same as before.
-#
-# The spec of record is ``docs/spec/feed.md`` — adding a new value here
-# without updating that document will drift. ``last_error_code`` is also
-# user-visible, so adding/removing an ``ErrorCode`` member is an API
-# contract change.
-# ---------------------------------------------------------------------------
-
-from enum import StrEnum
-
-
 class FeedStatus(StrEnum):
     ACTIVE = "active"
     BROKEN = "broken"
@@ -184,7 +166,6 @@ class ErrorCode(StrEnum):
     RATE_LIMITED = "rate_limited"
     # Content / parsing
     NOT_A_FEED = "not_a_feed"
-    PARSE_ERROR = "parse_error"
     REDIRECT_LOOP = "redirect_loop"
     TOO_LARGE = "too_large"
     # SSRF guard rejected the URL (private IP, bad scheme, etc.)

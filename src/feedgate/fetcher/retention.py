@@ -29,6 +29,7 @@ from fastapi import FastAPI
 from sqlalchemy import delete, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from feedgate.metrics import RETENTION_DELETED_TOTAL
 from feedgate.models import Entry
 
 logger = logging.getLogger(__name__)
@@ -105,8 +106,6 @@ async def tick_once(
             )
             await session.commit()
             if n > 0:
-                from feedgate.metrics import RETENTION_DELETED_TOTAL
-
                 RETENTION_DELETED_TOTAL.inc(n)
             return n
         except Exception:

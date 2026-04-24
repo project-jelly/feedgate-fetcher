@@ -1,28 +1,22 @@
 """Fetch-and-upsert pipeline for a single feed.
 
-``fetch_one`` performs one HTTP GET, parses the body, upserts any
-entries, and updates the feed's timer fields. Walking skeleton scope:
-
-  * No retry / tenacity — one attempt.
-  * No per-host rate limit, no ETag/If-Modified-Since conditional
-    requests (left for a later PR).
-  * No status-machine transitions — ``feeds.status`` stays
-    ``'active'`` regardless of failure; we only record the error code.
-  * No response-body size cap enforcement beyond httpx defaults.
+``fetch_one`` performs one HTTP GET, parses the body, upserts entries,
+and updates the feed's timer and lifecycle fields. One attempt per call
+(no tenacity retry); the scheduler drives re-tries via ``next_fetch_at``.
 
 On success:
-  * ``last_successful_fetch_at`` and ``last_attempt_at`` both set to
-    ``now``
-  * ``next_fetch_at = now + interval_seconds``
+  * ``last_successful_fetch_at`` and ``last_attempt_at`` set to ``now``
   * ``consecutive_failures = 0``, ``last_error_code = None``
-  * ``title`` refreshed from the parsed feed metadata if present
+  * ``status`` flipped to ``active`` if it was ``broken``
+  * ETag / Last-Modified cached for conditional requests on next fetch
 
 On failure:
   * ``last_attempt_at`` set to ``now``
-  * ``next_fetch_at = now + interval_seconds`` (no backoff yet)
-  * ``consecutive_failures += 1``
-  * ``last_error_code`` set to a short string code
-  * Exception is swallowed — the scheduler tick keeps going
+  * ``consecutive_failures += 1``, ``last_error_code`` set
+  * Lifecycle transitions: active → broken at threshold,
+    broken → dead after ``dead_duration_days`` without success,
+    HTTP 410 → dead immediately
+  * Exception is swallowed — the scheduler tick continues
 """
 
 from __future__ import annotations
@@ -42,8 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
-from feedgate.models import ErrorCode, FeedStatus
-from feedgate.models import Entry, Feed
+from feedgate.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
+from feedgate.models import Entry, ErrorCode, Feed, FeedStatus
 from feedgate.ssrf import BlockedURLError, validate_public_url
 
 logger = logging.getLogger(__name__)
@@ -344,8 +338,6 @@ async def fetch_one(
                     entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
                     entry_frequency_factor=entry_frequency_factor,
                 )
-                from feedgate.metrics import FETCH_DURATION, FETCH_TOTAL
-
                 FETCH_TOTAL.labels(result="not_modified").inc()
                 FETCH_DURATION.labels(result="not_modified").observe(time.perf_counter() - _t0)
                 return
@@ -363,8 +355,6 @@ async def fetch_one(
                 wait_seconds = max(wait_seconds, interval_seconds)
                 feed.last_error_code = ErrorCode.RATE_LIMITED
                 feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
-                from feedgate.metrics import FETCH_DURATION, FETCH_TOTAL
-
                 FETCH_TOTAL.labels(result="rate_limited").inc()
                 FETCH_DURATION.labels(result="rate_limited").observe(time.perf_counter() - _t0)
                 return
@@ -422,8 +412,6 @@ async def fetch_one(
         _server_hint = _parse_cache_hint(response.headers, now=now)
         if parsed.ttl_seconds is not None and parsed.ttl_seconds > 0:
             _server_hint = max(_server_hint or 0, parsed.ttl_seconds) or None
-        from feedgate.metrics import FETCH_DURATION, FETCH_TOTAL
-
         FETCH_TOTAL.labels(result="success").inc()
         FETCH_DURATION.labels(result="success").observe(time.perf_counter() - _t0)
     except Exception as exc:
@@ -437,8 +425,6 @@ async def fetch_one(
             code,
             exc,
         )
-        from feedgate.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
-
         FETCH_TOTAL.labels(result="error").inc()
         FETCH_ERROR_TOTAL.labels(error_code=code).inc()
         FETCH_DURATION.labels(result="error").observe(time.perf_counter() - _t0)
