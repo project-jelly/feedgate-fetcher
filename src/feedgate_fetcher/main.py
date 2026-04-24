@@ -33,12 +33,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from feedgate import metrics as _metrics
-from feedgate.api import register_exception_handlers, register_routers
-from feedgate.config import get_settings
-from feedgate.fetcher import retention, scheduler
-from feedgate.logging_config import configure_logging
-from feedgate.ssrf import SSRFGuardTransport
+from feedgate_fetcher import metrics as _metrics
+from feedgate_fetcher.api import register_exception_handlers, register_routers
+from feedgate_fetcher.config import get_settings
+from feedgate_fetcher.fetcher import retention, scheduler
+from feedgate_fetcher.logging_config import configure_logging
+from feedgate_fetcher.ssrf import SSRFGuardTransport
 
 logger = logging.getLogger(__name__)
 
@@ -241,4 +241,4 @@ def create_app() -> FastAPI:
     return app
 
 
-# Run under uvicorn with:  uvicorn feedgate.main:create_app --factory
+# Run under uvicorn with:  uvicorn feedgate_fetcher.main:create_app --factory

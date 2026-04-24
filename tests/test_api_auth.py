@@ -10,8 +10,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from feedgate.api import register_routers
-from feedgate.config import Settings
+from feedgate_fetcher.api import register_routers
+from feedgate_fetcher.config import Settings
 
 
 @pytest_asyncio.fixture

@@ -18,7 +18,7 @@ from typing import Any
 import anyio
 import feedparser
 
-from feedgate.fetcher.upsert import ParsedEntry
+from feedgate_fetcher.fetcher.upsert import ParsedEntry
 
 
 @dataclass(frozen=True)

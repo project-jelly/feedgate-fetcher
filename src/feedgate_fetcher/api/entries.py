@@ -22,9 +22,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.api import get_session
-from feedgate.models import Entry
-from feedgate.schemas import EntryResponse, PaginatedEntries
+from feedgate_fetcher.api import get_session
+from feedgate_fetcher.models import Entry
+from feedgate_fetcher.schemas import EntryResponse, PaginatedEntries
 
 router = APIRouter(prefix="/v1/entries", tags=["entries"])
 

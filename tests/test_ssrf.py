@@ -26,11 +26,11 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate import ssrf
-from feedgate.fetcher.http import fetch_one
-from feedgate.models import ErrorCode
-from feedgate.models import Feed
-from feedgate.ssrf import (
+from feedgate_fetcher import ssrf
+from feedgate_fetcher.fetcher.http import fetch_one
+from feedgate_fetcher.models import ErrorCode
+from feedgate_fetcher.models import Feed
+from feedgate_fetcher.ssrf import (
     BlockedURLError,
     SSRFGuardTransport,
     validate_public_url,

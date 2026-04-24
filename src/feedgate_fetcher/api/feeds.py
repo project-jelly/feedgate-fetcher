@@ -22,11 +22,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.api import get_session
-from feedgate.config import get_settings
-from feedgate.models import Feed, FeedStatus
-from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
-from feedgate.ssrf import BlockedURLError, validate_public_url
+from feedgate_fetcher.api import get_session
+from feedgate_fetcher.config import get_settings
+from feedgate_fetcher.models import Feed, FeedStatus
+from feedgate_fetcher.schemas import FeedCreate, FeedResponse, PaginatedFeeds
+from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
 _DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
 

@@ -41,5 +41,5 @@ EXPOSE 8000
 # nothing — it uses the same uvicorn entry point but flips
 # `FEEDGATE_SCHEDULER_ENABLED=true` so the lifespan starts the
 # background scheduler task.
-CMD ["uv", "run", "--no-sync", "uvicorn", "feedgate.main:create_app", \
+CMD ["uv", "run", "--no-sync", "uvicorn", "feedgate_fetcher.main:create_app", \
      "--factory", "--host", "0.0.0.0", "--port", "8000"]

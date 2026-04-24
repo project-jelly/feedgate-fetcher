@@ -17,10 +17,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.api import register_routers
-from feedgate.api import feeds as feeds_api
-from feedgate.config import Settings
-from feedgate.models import Feed
+from feedgate_fetcher.api import register_routers
+from feedgate_fetcher.api import feeds as feeds_api
+from feedgate_fetcher.config import Settings
+from feedgate_fetcher.models import Feed
 
 
 @pytest.mark.asyncio

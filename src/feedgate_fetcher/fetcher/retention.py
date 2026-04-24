@@ -31,8 +31,8 @@ from fastapi import FastAPI
 from sqlalchemy import delete, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.metrics import RETENTION_DELETED_TOTAL
-from feedgate.models import Entry
+from feedgate_fetcher.metrics import RETENTION_DELETED_TOTAL
+from feedgate_fetcher.models import Entry
 
 logger = structlog.get_logger()
 

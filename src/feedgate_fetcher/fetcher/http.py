@@ -34,11 +34,11 @@ import structlog
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.fetcher.parser import parse_feed
-from feedgate.fetcher.upsert import upsert_entries
-from feedgate.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
-from feedgate.models import Entry, ErrorCode, Feed, FeedStatus
-from feedgate.ssrf import BlockedURLError, validate_public_url
+from feedgate_fetcher.fetcher.parser import parse_feed
+from feedgate_fetcher.fetcher.upsert import upsert_entries
+from feedgate_fetcher.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
+from feedgate_fetcher.models import Entry, ErrorCode, Feed, FeedStatus
+from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
 logger = structlog.get_logger()
 

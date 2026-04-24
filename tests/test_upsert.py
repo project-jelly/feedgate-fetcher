@@ -19,8 +19,8 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.fetcher.upsert import ParsedEntry, upsert_entries
-from feedgate.models import Entry, Feed
+from feedgate_fetcher.fetcher.upsert import ParsedEntry, upsert_entries
+from feedgate_fetcher.models import Entry, Feed
 
 
 @pytest_asyncio.fixture

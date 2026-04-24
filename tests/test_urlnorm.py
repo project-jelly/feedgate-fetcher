@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from feedgate.api.feeds import normalize_url
+from feedgate_fetcher.api.feeds import normalize_url
 
 
 def test_scheme_lowercased() -> None:

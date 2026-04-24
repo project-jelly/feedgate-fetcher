@@ -17,9 +17,9 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.fetcher import retention
-from feedgate.models import Entry, Feed
-from feedgate.fetcher.retention import sweep
+from feedgate_fetcher.fetcher import retention
+from feedgate_fetcher.models import Entry, Feed
+from feedgate_fetcher.fetcher.retention import sweep
 
 
 async def _mk_feed(session: AsyncSession, url: str) -> int:

@@ -20,15 +20,15 @@ from httpx import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.config import Settings
-from feedgate.fetcher.http import (
+from feedgate_fetcher.config import Settings
+from feedgate_fetcher.fetcher.http import (
     _classify_error,
     _compute_next_fetch_at,
     _parse_retry_after,
     fetch_one,
 )
-from feedgate.models import ErrorCode
-from feedgate.models import Entry, Feed
+from feedgate_fetcher.models import ErrorCode
+from feedgate_fetcher.models import Entry, Feed
 
 _TEST_SETTINGS = Settings()
 _FETCH_DEFAULTS: dict[str, Any] = {

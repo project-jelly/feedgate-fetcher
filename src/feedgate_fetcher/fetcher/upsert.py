@@ -25,7 +25,7 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.models import Entry
+from feedgate_fetcher.models import Entry
 
 
 @dataclass(frozen=True)

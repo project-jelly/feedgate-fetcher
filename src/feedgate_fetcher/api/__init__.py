@@ -176,7 +176,7 @@ def _add_metrics_middleware(app: FastAPI) -> None:
             duration = time.perf_counter() - t0
             route = request.scope.get("route")
             path = route.path if route else request.url.path
-            from feedgate.metrics import API_DURATION, API_REQUESTS_TOTAL
+            from feedgate_fetcher.metrics import API_DURATION, API_REQUESTS_TOTAL
             API_REQUESTS_TOTAL.labels(
                 method=request.method,
                 path=path,
@@ -190,7 +190,7 @@ def _add_metrics_middleware(app: FastAPI) -> None:
 
 def register_routers(app: FastAPI) -> None:
     """Mount all routers onto ``app``."""
-    from feedgate.api import entries, feeds
+    from feedgate_fetcher.api import entries, feeds
 
     _add_metrics_middleware(app)
 

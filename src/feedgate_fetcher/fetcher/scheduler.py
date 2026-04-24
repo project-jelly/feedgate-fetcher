@@ -37,8 +37,8 @@ from fastapi import FastAPI
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate.fetcher.http import fetch_one
-from feedgate.models import Feed, FeedStatus
+from feedgate_fetcher.fetcher.http import fetch_one
+from feedgate_fetcher.models import Feed, FeedStatus
 
 logger = structlog.get_logger()
 

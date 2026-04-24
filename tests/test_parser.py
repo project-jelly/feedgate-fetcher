@@ -10,7 +10,7 @@ from datetime import datetime
 
 import pytest
 
-from feedgate.fetcher.parser import parse_feed
+from feedgate_fetcher.fetcher.parser import parse_feed
 
 ATOM_SAMPLE = b"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

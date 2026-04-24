@@ -9,7 +9,7 @@ from prometheus_client import Counter, Gauge, Histogram
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from feedgate.models import Entry, Feed, FeedStatus
+from feedgate_fetcher.models import Entry, Feed, FeedStatus
 
 logger = structlog.get_logger()
 

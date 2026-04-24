@@ -18,11 +18,11 @@ from httpx import AsyncClient, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate.config import Settings
-from feedgate.fetcher import scheduler
-from feedgate.fetcher.scheduler import _claim_due_feeds
-from feedgate.main import make_engine, make_session_factory
-from feedgate.models import Entry, Feed
+from feedgate_fetcher.config import Settings
+from feedgate_fetcher.fetcher import scheduler
+from feedgate_fetcher.fetcher.scheduler import _claim_due_feeds
+from feedgate_fetcher.main import make_engine, make_session_factory
+from feedgate_fetcher.models import Entry, Feed
 
 
 def _atom_with(guid: str, title: str) -> bytes:

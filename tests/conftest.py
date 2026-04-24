@@ -32,10 +32,10 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.postgres import PostgresContainer
 
-from feedgate.api import register_routers
-from feedgate.api import feeds as feeds_api
-from feedgate.config import Settings
-from feedgate.main import make_engine, make_session_factory
+from feedgate_fetcher.api import register_routers
+from feedgate_fetcher.api import feeds as feeds_api
+from feedgate_fetcher.config import Settings
+from feedgate_fetcher.main import make_engine, make_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
