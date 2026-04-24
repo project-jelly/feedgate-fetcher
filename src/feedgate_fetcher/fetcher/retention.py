@@ -143,9 +143,8 @@ async def run(
 ) -> None:
     """Background loop that calls ``tick_once`` every interval.
 
-    TDD-exempt — thin wrapper around ``tick_once``, correctness is
-    covered by the sweep tests and the tick_once integration test.
-    Never lets the loop die: any exception is logged and swallowed.
+    Stops when ``stop_event`` is set. Exceptions are logged and swallowed;
+    consecutive failures trigger exponential backoff up to 300s.
     """
     interval = app.state.retention_sweep_interval_seconds
     stop = stop_event or asyncio.Event()

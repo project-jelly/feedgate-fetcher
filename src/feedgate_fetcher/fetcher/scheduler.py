@@ -14,9 +14,8 @@
     semantics.
 
   * ``run(app, stop_event)`` — the background loop that drives
-    ``tick_once`` on a timer. Intentionally thin and TDD-exempt per
-    the plan; its correctness is covered by tick_once integration
-    tests and F2 (walking-skeleton E2E).
+    ``tick_once`` on a fixed interval. Stops cleanly when
+    ``stop_event`` is set.
 
 The app reads its state from ``app.state``:
   * ``session_factory`` (sqlalchemy async_sessionmaker)
@@ -224,10 +223,9 @@ async def run(
 ) -> None:
     """Background loop that calls ``tick_once`` every interval.
 
-    TDD-exempt per WP 4.3 — the loop body is intentionally ~10 LOC and
-    its correctness is covered by the integration tests of ``tick_once``
-    and by F2 (walking-skeleton E2E). The stop_event parameter is a
-    plain ``asyncio.Event``; ``None`` means "run until cancelled".
+    Stops when ``stop_event`` is set. Exceptions from ``tick_once`` are
+    logged and swallowed so a single bad tick cannot kill the loop.
+    Consecutive failures trigger exponential backoff up to 300s.
     """
     interval = app.state.fetch_interval_seconds
     stop = stop_event or asyncio.Event()

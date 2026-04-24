@@ -163,7 +163,6 @@ def _parse_retry_after(header: str | None, *, now: datetime) -> int | None:
     if header is None:
         return None
     stripped = header.strip()
-    # Integer-seconds form.
     try:
         return max(0, int(stripped))
     except ValueError:

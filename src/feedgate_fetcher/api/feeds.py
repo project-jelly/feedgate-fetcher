@@ -132,7 +132,6 @@ async def create_feed(
     result = await session.execute(stmt)
     new_id = result.scalar_one_or_none()
 
-    # Load the row either way (newly inserted OR pre-existing).
     feed = (await session.execute(select(Feed).where(Feed.url == url))).scalar_one()
     if new_id is None:
         response.status_code = status.HTTP_200_OK
@@ -202,21 +201,9 @@ async def reactivate_feed(
     feed_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
-    """Manually flip any feed back to ``active`` (spec/feed.md).
-
-    The primary use case is moving a ``dead`` feed back into the
-    fetch rotation after an operator has confirmed the upstream is
-    healthy again. Also works on a ``broken`` feed to skip the
-    exponential backoff and force an immediate next tick.
-
-    Semantics:
-      * ``status`` -> ``'active'``
-      * ``consecutive_failures`` -> ``0``
-      * ``last_error_code`` -> ``None``
-      * ``next_fetch_at`` -> ``now`` (picked up by the very next tick)
-      * ``last_successful_fetch_at`` stays unchanged (we have not
-        actually succeeded yet — a subsequent successful fetch will
-        update it)
+    """Manually move any feed back to ``active`` and schedule it for
+    immediate re-fetch. ``last_successful_fetch_at`` is NOT updated —
+    that happens only on a real successful fetch.
     """
     feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
     if feed is None:
