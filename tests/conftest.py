@@ -32,8 +32,8 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.postgres import PostgresContainer
 
-from feedgate_fetcher.api import register_routers
 from feedgate_fetcher.api import feeds as feeds_api
+from feedgate_fetcher.api import register_routers
 from feedgate_fetcher.config import Settings
 from feedgate_fetcher.main import make_engine, make_session_factory
 
@@ -127,7 +127,7 @@ async def api_app(
     settings = Settings()
     app = FastAPI()
     app.state.limiter = feeds_api.limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = async_session_factory
     app.state.api_key = ""  # no auth in tests by default

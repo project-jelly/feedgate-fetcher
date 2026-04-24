@@ -17,8 +17,8 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from feedgate_fetcher.api import register_routers
 from feedgate_fetcher.api import feeds as feeds_api
+from feedgate_fetcher.api import register_routers
 from feedgate_fetcher.config import Settings
 from feedgate_fetcher.models import Feed
 
@@ -84,7 +84,7 @@ async def test_post_feed_rate_limit_returns_429(
     settings = Settings()
     app = FastAPI()
     app.state.limiter = feeds_api.limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
     app.state.session_factory = async_session_factory
     app.state.api_key = ""

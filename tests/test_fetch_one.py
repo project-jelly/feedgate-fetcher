@@ -27,8 +27,7 @@ from feedgate_fetcher.fetcher.http import (
     _parse_retry_after,
     fetch_one,
 )
-from feedgate_fetcher.models import ErrorCode
-from feedgate_fetcher.models import Entry, Feed
+from feedgate_fetcher.models import Entry, ErrorCode, Feed
 
 _TEST_SETTINGS = Settings()
 _FETCH_DEFAULTS: dict[str, Any] = {

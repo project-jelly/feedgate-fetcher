@@ -11,6 +11,7 @@ dataclasses the rest of the pipeline consumes (fetcher.upsert takes
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -82,10 +83,8 @@ def _parse_sync(body: bytes) -> ParsedFeed:
     if feed_meta:
         ttl_raw = feed_meta.get("ttl")
         if ttl_raw is not None:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 ttl_seconds = max(0, int(ttl_raw)) * 60
-            except (TypeError, ValueError):
-                pass
     return ParsedFeed(title=feed_title, ttl_seconds=ttl_seconds, entries=entries)
 
 

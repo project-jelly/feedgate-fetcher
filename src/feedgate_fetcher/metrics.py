@@ -107,9 +107,9 @@ async def _collect_state(
         SCHEDULER_DUE_FEEDS.set(due_count)
 
     pool = engine.pool
-    checkedout = pool.checkedout()
+    checkedout = pool.checkedout()  # type: ignore[attr-defined]
     DB_POOL_CHECKEDOUT.set(checkedout)
-    DB_POOL_OVERFLOW.set(max(0, checkedout - pool.size()))
+    DB_POOL_OVERFLOW.set(max(0, checkedout - pool.size()))  # type: ignore[attr-defined]
 
 
 async def run_collector(

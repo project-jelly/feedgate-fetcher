@@ -15,7 +15,7 @@ import hmac
 import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
-from typing import cast
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -168,7 +168,7 @@ def _add_metrics_middleware(app: FastAPI) -> None:
     from starlette.requests import Request as StarletteRequest
 
     class MetricsMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
+        async def dispatch(self, request: StarletteRequest, call_next: Any) -> Any:
             if request.url.path == "/metrics":
                 return await call_next(request)
             t0 = time.perf_counter()
