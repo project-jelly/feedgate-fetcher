@@ -107,19 +107,13 @@ def _compute_next_fetch_at(
 
 
 def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
-    """Emit a WARNING-level log entry for a feed lifecycle transition.
-
-    INFO is currently swallowed by the default stdlib root logger
-    configuration, so lifecycle moves go out at WARNING level to
-    ensure operator visibility (see spec/feed.md "관찰 가능성").
-    """
     logger.warning(
-        "feed_id=%s url=%s state=%s->%s reason=%s",
-        feed.id,
-        feed.effective_url,
-        feed.status,
-        new_status,
-        reason,
+        "feed_state_transition",
+        feed_id=feed.id,
+        url=feed.effective_url,
+        old_status=feed.status,
+        new_status=new_status,
+        reason=reason,
     )
 
 
