@@ -11,6 +11,7 @@ pytest) must set before the app handles any request.
 
 from __future__ import annotations
 
+import hmac
 import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
@@ -64,7 +65,7 @@ async def require_api_key(request: Request) -> None:
     if not configured_key:
         return  # auth disabled
     provided_key = request.headers.get("x-api-key", "")
-    if not provided_key or provided_key != configured_key:
+    if not provided_key or not hmac.compare_digest(provided_key, configured_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid_api_key",

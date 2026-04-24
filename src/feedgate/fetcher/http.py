@@ -324,12 +324,12 @@ async def fetch_one(
             # 304 Not Modified — feed unchanged. Schedule the next fetch
             # and return early without touching consecutive_failures or status.
             if response.status_code == 304:
+                feed.last_successful_fetch_at = now
                 if feed.status == FeedStatus.BROKEN:
                     _log_transition(feed, FeedStatus.ACTIVE, reason="http_304_recovery")
                     feed.status = FeedStatus.ACTIVE
                     feed.consecutive_failures = 0
                     feed.last_error_code = None
-                    feed.last_successful_fetch_at = now
                 _server_hint = _parse_cache_hint(response.headers, now=now)
                 feed.next_fetch_at = _compute_next_fetch_at(
                     feed,

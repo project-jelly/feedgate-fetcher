@@ -1193,7 +1193,7 @@ async def test_fetch_one_304_schedules_next_fetch_without_updating_success_field
 
     state = await _load_feed(sf, feed_id)
     assert state["next_fetch_at"] == now + timedelta(seconds=interval)
-    assert state["last_successful_fetch_at"] is None
+    assert state["last_successful_fetch_at"] == now
     assert state["consecutive_failures"] == 0
 
 
