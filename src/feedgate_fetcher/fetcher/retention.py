@@ -149,7 +149,10 @@ async def run(
         try:
             n = await tick_once(app)
             consecutive_errors = 0
-            logger.info("retention sweep deleted %d entries", n)
+            if n > 0:
+                logger.info("retention sweep deleted %d entries", n)
+            else:
+                logger.debug("retention sweep: nothing to delete")
         except Exception:
             consecutive_errors += 1
             logger.exception("retention sweep raised; continuing")
