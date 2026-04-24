@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # per-phase timeouts so it only fires on pathological cases.
     fetch_total_budget_seconds: float = 30.0
     fetch_max_bytes: int = 5 * 1024 * 1024
-    fetch_user_agent: str = "feedgate-fetcher/0.0.1 (+https://github.com/feedgate)"
+    fetch_user_agent: str = "feedgate-fetcher/0.1.0 (+https://github.com/feedgate)"
     fetch_max_entries_initial: int = 50
     fetch_max_entries_per_fetch: int = 200
     fetch_concurrency: int = 4
