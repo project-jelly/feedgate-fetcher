@@ -50,16 +50,6 @@ class Settings(BaseSettings):
     fetch_max_entries_initial: int = 50
     fetch_max_entries_per_fetch: int = 200
     fetch_concurrency: int = 4
-    # Per-host concurrency cap. The global ``fetch_concurrency`` bounds
-    # how many feeds we fetch simultaneously across the whole tick;
-    # this knob bounds how many of those can target the **same** host.
-    # Default 1 means same-host requests are fully serialized within a
-    # tick — important when one origin hosts dozens of our feeds (e.g.
-    # all the GitHub release feeds), so we never look like a DDoS to
-    # any single upstream. The cap is per-tick (the dict is rebuilt
-    # every tick_once); cross-tick spacing is handled by the existing
-    # ``next_fetch_at`` schedule.
-    fetch_per_host_concurrency: int = 1
     # On shutdown, the lifespan signals the background tasks via a
     # stop ``asyncio.Event`` and gives each one this many seconds to
     # finish its current iteration cleanly. Tasks that overrun the
@@ -75,15 +65,13 @@ class Settings(BaseSettings):
     # and leave its claimed feeds dangling until the SKIP LOCKED
     # lease TTL (180s) expires.
     shutdown_drain_seconds: float = 90.0
-    # Distributed-claim tuning for the scheduler's SKIP LOCKED loop.
-    # A tick atomically reserves up to `fetch_claim_batch_size` feeds
-    # by advancing their `next_fetch_at` to `now + claim_ttl_seconds`
-    # (and `last_attempt_at = now`). Another worker running in
-    # parallel sees the bumped timestamps and skips the feed until the
-    # lease expires, giving crash-safe at-least-once semantics without
-    # an external queue.
+    # Scheduler claim tuning. A tick atomically reserves up to
+    # `fetch_claim_batch_size` feeds by advancing their `next_fetch_at`
+    # to `now + claim_ttl_seconds`. The TTL acts as a crash-safe lease:
+    # if the process dies mid-tick the feeds become claimable again
+    # once the TTL elapses.
     fetch_claim_batch_size: int = 8
-    fetch_claim_ttl_seconds: int = 180
+    fetch_claim_ttl_seconds: int = 90
     entry_frequency_min_interval_seconds: int = 300
     entry_frequency_max_interval_seconds: int = 86400
     entry_frequency_factor: int = 1

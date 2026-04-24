@@ -100,8 +100,11 @@ async def test_walking_skeleton_happy_path(
         assert "last_successful_fetch_at" in feed
         feed_id = feed["id"]
 
-        # Drive one scheduler tick manually.
-        await scheduler.tick_once(app)
+        # Drive one scheduler tick manually. Pass a future `now` so the
+        # feed is definitely due regardless of registration jitter.
+        from datetime import UTC, datetime, timedelta
+
+        await scheduler.tick_once(app, now=datetime.now(UTC) + timedelta(seconds=61))
 
         # Fetch entries for the registered feed.
         resp = await client.get(

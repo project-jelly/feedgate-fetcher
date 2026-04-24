@@ -129,7 +129,6 @@ async def test_pool_saturation_does_not_raise_for_concurrent_fetches(
     app.state.fetch_interval_seconds = 60
     app.state.fetch_user_agent = "feedgate-fetcher/test"
     app.state.fetch_concurrency = 4
-    app.state.fetch_per_host_concurrency = settings.fetch_per_host_concurrency
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
     app.state.fetch_max_bytes = settings.fetch_max_bytes
@@ -446,38 +445,6 @@ def _make_barrier_recorder() -> tuple[
         )
 
     return state, both_in_flight, recorder
-
-
-@pytest.mark.asyncio
-async def test_per_host_throttle_serializes_same_host_feeds(
-    fetch_app: FastAPI,
-    respx_mock: respx.Router,
-) -> None:
-    """Two feeds on the same host must NEVER overlap inside the HTTP
-    side-effect. The barrier event the recorder uses is wired so that
-    a second concurrent caller would *immediately* set it; if the
-    per-host semaphore is doing its job, the second caller is blocked
-    in scheduler land and never reaches the side-effect, so the event
-    stays clear and ``max_in_flight`` stays at 1."""
-    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
-    url_a = "http://same.test/a/feed"
-    url_b = "http://same.test/b/feed"
-
-    now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
-    await _seed_due_feeds(sf, [url_a, url_b], now)
-
-    state, both_in_flight, recorder = _make_barrier_recorder()
-    respx_mock.get(url_a).mock(side_effect=recorder)
-    respx_mock.get(url_b).mock(side_effect=recorder)
-
-    await scheduler.tick_once(fetch_app, now=now)
-
-    assert state["max_in_flight"] == 1, (
-        f"per-host throttle leaked: max_in_flight={state['max_in_flight']}"
-    )
-    assert not both_in_flight.is_set(), (
-        "barrier event fired — two callers were inside the side-effect simultaneously"
-    )
 
 
 @pytest.mark.asyncio
