@@ -3,17 +3,33 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"   # strict semver only — prevents vfoo/v1 from triggering
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  test:
+    name: lint + type + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { version: latest, enable-cache: true }
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy src tests
+      - run: uv run pytest -q
+
   docker:
     name: Build & push Docker image
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: test                     # gate: tests must pass before image is pushed
 
     steps:
       - name: Checkout
@@ -37,7 +53,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
