@@ -171,9 +171,7 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
         return
 
     sem = asyncio.Semaphore(app.state.fetch_concurrency)
-    await asyncio.gather(
-        *(_process_feed(fid, app, sem, now) for fid in feed_ids)
-    )
+    await asyncio.gather(*(_process_feed(fid, app, sem, now) for fid in feed_ids))
 
 
 async def run(
