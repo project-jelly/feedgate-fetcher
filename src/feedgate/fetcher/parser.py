@@ -24,6 +24,7 @@ from feedgate.fetcher.upsert import ParsedEntry
 @dataclass(frozen=True)
 class ParsedFeed:
     title: str | None
+    ttl_seconds: int | None = None
     entries: list[ParsedEntry] = field(default_factory=list)
 
 
@@ -77,7 +78,15 @@ def _parse_sync(body: bytes) -> ParsedFeed:
     feed_meta = getattr(parsed, "feed", None)
     feed_title = feed_meta.get("title") if feed_meta else None
     entries = [_extract_entry(e) for e in parsed.entries]
-    return ParsedFeed(title=feed_title, entries=entries)
+    ttl_seconds: int | None = None
+    if feed_meta:
+        ttl_raw = feed_meta.get("ttl")
+        if ttl_raw is not None:
+            try:
+                ttl_seconds = max(0, int(ttl_raw)) * 60
+            except (TypeError, ValueError):
+                pass
+    return ParsedFeed(title=feed_title, ttl_seconds=ttl_seconds, entries=entries)
 
 
 async def parse_feed(body: bytes) -> ParsedFeed:

@@ -162,6 +162,9 @@ def create_app() -> FastAPI:
     app.state.shutdown_drain_seconds = settings.shutdown_drain_seconds
     app.state.fetch_claim_batch_size = settings.fetch_claim_batch_size
     app.state.fetch_claim_ttl_seconds = settings.fetch_claim_ttl_seconds
+    app.state.entry_frequency_min_interval_seconds = settings.entry_frequency_min_interval_seconds
+    app.state.entry_frequency_max_interval_seconds = settings.entry_frequency_max_interval_seconds
+    app.state.entry_frequency_factor = settings.entry_frequency_factor
     app.state.retention_days = settings.retention_days
     app.state.retention_min_per_feed = settings.retention_min_per_feed
     app.state.retention_sweep_interval_seconds = settings.retention_sweep_interval_seconds
@@ -174,6 +177,7 @@ def create_app() -> FastAPI:
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit
     app.state.api_feeds_max_limit = settings.api_feeds_max_limit
+    app.state.api_key = settings.api_key
     register_routers(app)
     register_exception_handlers(app)
     return app

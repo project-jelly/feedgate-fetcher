@@ -15,7 +15,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from feedgate.lifecycle import ErrorCode, FeedStatus
+from feedgate.models import ErrorCode, FeedStatus
 
 
 class FeedCreate(BaseModel):

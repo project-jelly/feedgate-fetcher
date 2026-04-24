@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     # an external queue.
     fetch_claim_batch_size: int = 8
     fetch_claim_ttl_seconds: int = 180
+    entry_frequency_min_interval_seconds: int = 300
+    entry_frequency_max_interval_seconds: int = 86400
+    entry_frequency_factor: int = 1
     scheduler_enabled: bool = True
 
     # Retention policy (ADR 004, docs/spec/entry.md).
@@ -108,6 +111,8 @@ class Settings(BaseSettings):
     api_entries_default_limit: int = 50
     api_entries_max_limit: int = 200
     api_feeds_max_limit: int = 200
+
+    api_key: str = ""  # empty = no auth
 
 
 def get_settings() -> Settings:

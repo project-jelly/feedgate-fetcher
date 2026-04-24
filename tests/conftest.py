@@ -123,6 +123,7 @@ async def api_app(
     settings = Settings()
     app = FastAPI()
     app.state.session_factory = async_session_factory
+    app.state.api_key = ""  # no auth in tests by default
     app.state.api_entries_max_feed_ids = settings.api_entries_max_feed_ids
     app.state.api_entries_default_limit = settings.api_entries_default_limit
     app.state.api_entries_max_limit = settings.api_entries_max_limit
@@ -159,6 +160,7 @@ async def fetch_app(
     settings = Settings()
     app = FastAPI()
     app.state.session_factory = async_session_factory
+    app.state.api_key = ""  # no auth in tests by default
     app.state.http_client = AsyncClient()
     app.state.fetch_interval_seconds = 60
     app.state.fetch_user_agent = "feedgate-fetcher/test"
@@ -174,6 +176,9 @@ async def fetch_app(
     app.state.broken_max_backoff_seconds = settings.broken_max_backoff_seconds
     app.state.backoff_jitter_ratio = settings.backoff_jitter_ratio
     app.state.dead_probe_interval_days = settings.dead_probe_interval_days
+    app.state.entry_frequency_min_interval_seconds = settings.entry_frequency_min_interval_seconds
+    app.state.entry_frequency_max_interval_seconds = settings.entry_frequency_max_interval_seconds
+    app.state.entry_frequency_factor = settings.entry_frequency_factor
     try:
         yield app
     finally:

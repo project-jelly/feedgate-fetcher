@@ -26,7 +26,7 @@ from feedgate.fetcher.http import (
     _parse_retry_after,
     fetch_one,
 )
-from feedgate.lifecycle import ErrorCode
+from feedgate.models import ErrorCode
 from feedgate.models import Entry, Feed
 
 _TEST_SETTINGS = Settings()
@@ -38,6 +38,9 @@ _FETCH_DEFAULTS: dict[str, Any] = {
     "dead_duration_days": _TEST_SETTINGS.dead_duration_days,
     "broken_max_backoff_seconds": _TEST_SETTINGS.broken_max_backoff_seconds,
     "backoff_jitter_ratio": _TEST_SETTINGS.backoff_jitter_ratio,
+    "entry_frequency_min_interval_seconds": 300,
+    "entry_frequency_max_interval_seconds": 86400,
+    "entry_frequency_factor": 1,
 }
 
 
@@ -1154,3 +1157,717 @@ def test_compute_next_fetch_at_broken_feed_capped_at_max_backoff() -> None:
     )
     delta_seconds = (result - now).total_seconds()
     assert 2700 <= delta_seconds <= 4500
+
+
+# ---- ETag / If-None-Match + Last-Modified / If-Modified-Since tests ---------
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_304_schedules_next_fetch_without_updating_success_fields(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A 304 Not Modified response must advance next_fetch_at but must NOT
+    update last_successful_fetch_at or consecutive_failures."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/conditional-304"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(return_value=Response(304))
+
+    now = datetime(2026, 4, 23, 10, 0, 0, tzinfo=UTC)
+    interval = 60
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=interval,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=interval)
+    assert state["last_successful_fetch_at"] is None
+    assert state["consecutive_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_sends_if_none_match_on_second_fetch(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """After a 200 that returns ETag, the next fetch must include
+    If-None-Match with that ETag value."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/etag-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    etag_value = '"abc123"'
+
+    # First fetch: 200 with ETag header
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml", "ETag": etag_value},
+        )
+    )
+
+    now1 = datetime(2026, 4, 23, 10, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now1,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    # Second fetch: verify If-None-Match is sent
+    captured_headers: dict[str, str] = {}
+
+    def capture_and_respond(request: Any) -> Response:
+        captured_headers.update(dict(request.headers))
+        return Response(304)
+
+    respx_mock.get(feed_url).mock(side_effect=capture_and_respond)
+
+    now2 = datetime(2026, 4, 23, 11, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now2,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    assert captured_headers.get("if-none-match") == etag_value
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_sends_if_modified_since_when_no_etag(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """When there is no ETag but a Last-Modified is stored, the next
+    fetch must include If-Modified-Since instead."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/last-modified-feed"
+    last_modified_value = "Wed, 23 Apr 2026 09:00:00 GMT"
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            last_modified=last_modified_value,
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    captured_headers: dict[str, str] = {}
+
+    def capture_and_respond(request: Any) -> Response:
+        captured_headers.update(dict(request.headers))
+        return Response(304)
+
+    respx_mock.get(feed_url).mock(side_effect=capture_and_respond)
+
+    now = datetime(2026, 4, 23, 10, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    assert captured_headers.get("if-modified-since") == last_modified_value
+    assert "if-none-match" not in captured_headers
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_updates_etag_on_new_200(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """When a 200 response returns a new ETag, feed.etag must be updated
+    to reflect the latest value."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/etag-update-feed"
+    old_etag = '"old-etag"'
+    new_etag = '"new-etag"'
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            etag=old_etag,
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml", "ETag": new_etag},
+        )
+    )
+
+    now = datetime(2026, 4, 23, 10, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        assert feed.etag == new_etag
+
+
+# ---- Improvement 1: 304 recovers a broken feed ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_304_recovers_broken_feed(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """A 304 on a broken feed must flip it back to active and reset failure counters."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/broken-304-recovery"
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            status="broken",
+            consecutive_failures=5,
+            last_error_code="http_5xx",
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    respx_mock.get(feed_url).mock(return_value=Response(304))
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["status"] == "active"
+    assert state["consecutive_failures"] == 0
+    assert state["last_successful_fetch_at"] == now
+
+
+# ---- Improvement 2: Cache-Control / Expires header parsing ------------------
+
+
+@pytest.mark.asyncio
+async def test_200_cache_control_max_age_sets_next_fetch(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Cache-Control: max-age=7200 on a 200 must set next_fetch_at to now+7200s."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/cache-control-max-age"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml", "Cache-Control": "max-age=7200"},
+        )
+    )
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=7200)
+
+
+@pytest.mark.asyncio
+async def test_200_cache_control_max_age_floored_at_base_interval(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Cache-Control: max-age=10 < base_interval=60 must be floored to 60s."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/cache-control-small-max-age"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml", "Cache-Control": "max-age=10"},
+        )
+    )
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=60)
+
+
+@pytest.mark.asyncio
+async def test_200_expires_header_sets_next_fetch(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Expires header 2h in the future must set next_fetch_at approximately now+2h."""
+    from email.utils import format_datetime as _fmt_dt
+
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/expires-header"
+    feed_id = await _create_feed(sf, feed_url)
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    expires_dt = now + timedelta(hours=2)
+    expires_str = _fmt_dt(expires_dt, usegmt=True)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=ATOM_BODY,
+            headers={"Content-Type": "application/atom+xml", "Expires": expires_str},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    assert abs(delta - 7200) <= 5
+
+
+@pytest.mark.asyncio
+async def test_304_cache_control_max_age_respected(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """Cache-Control: max-age=3600 on a 304 must set next_fetch_at to now+3600s."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/304-cache-control"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(304, headers={"Cache-Control": "max-age=3600"})
+    )
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=3600)
+
+
+# ---- Improvement 3: RSS TTL field -------------------------------------------
+
+_RSS_TTL_120 = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>TTL Feed</title>
+<ttl>120</ttl>
+<item><title>A</title><link>http://ex.com/1</link><guid>http://ex.com/1</guid></item>
+</channel></rss>"""
+
+_RSS_TTL_0 = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>TTL Feed</title>
+<ttl>0</ttl>
+<item><title>A</title><link>http://ex.com/1</link><guid>http://ex.com/1</guid></item>
+</channel></rss>"""
+
+
+@pytest.mark.asyncio
+async def test_rss_ttl_sets_next_fetch(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """RSS <ttl>120</ttl> (minutes) → 7200s must win over base_interval=60s."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/rss-ttl-120"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=_RSS_TTL_120,
+            headers={"Content-Type": "application/rss+xml"},
+        )
+    )
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=7200)
+
+
+@pytest.mark.asyncio
+async def test_rss_ttl_floored_at_base_interval(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    """RSS <ttl>0</ttl> → 0s must be floored to base_interval=60s."""
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/rss-ttl-0"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=_RSS_TTL_0,
+            headers={"Content-Type": "application/rss+xml"},
+        )
+    )
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=60)
+
+
+# ---- entry_frequency scheduling tests ---------------------------------------
+
+EMPTY_ATOM_BODY = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Empty Feed</title>
+  <id>http://t.test/empty</id>
+  <updated>2026-04-10T00:00:00Z</updated>
+</feed>
+"""
+
+
+async def _insert_entries(
+    session_factory: async_sessionmaker[AsyncSession],
+    feed_id: int,
+    fetched_ats: list[datetime],
+) -> None:
+    async with session_factory() as session:
+        for i, fat in enumerate(fetched_ats):
+            entry = Entry(
+                feed_id=feed_id,
+                guid=f"http://t.test/ef-entry/{feed_id}/{i}",
+                url=f"http://t.test/ef-entry/{feed_id}/{i}",
+                fetched_at=fat,
+                content_updated_at=fat,
+            )
+            session.add(entry)
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_entry_frequency_active_feed_with_history(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/ef-history"
+    feed_id = await _create_feed(sf, feed_url)
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    fetched_ats = [now - timedelta(days=i) for i in range(7)]
+    await _insert_entries(sf, feed_id, fetched_ats)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200, content=ATOM_BODY, headers={"Content-Type": "application/atom+xml"}
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(
+                entry_frequency_min_interval_seconds=300,
+                entry_frequency_max_interval_seconds=86400,
+                entry_frequency_factor=1,
+            ),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    assert abs(delta - 86400) <= 5
+
+
+@pytest.mark.asyncio
+async def test_entry_frequency_new_feed_falls_back_to_base_interval(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/ef-new"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200, content=EMPTY_ATOM_BODY, headers={"Content-Type": "application/atom+xml"}
+        )
+    )
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=3600,
+            user_agent="test-agent",
+            **_kwargs(
+                entry_frequency_min_interval_seconds=300,
+                entry_frequency_max_interval_seconds=86400,
+                entry_frequency_factor=1,
+            ),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=3600)
+
+
+@pytest.mark.asyncio
+async def test_entry_frequency_very_active_feed_clamped_at_min(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/ef-very-active"
+    feed_id = await _create_feed(sf, feed_url)
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    fetched_ats = [now - timedelta(minutes=i) for i in range(10000)]
+    await _insert_entries(sf, feed_id, fetched_ats)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200, content=ATOM_BODY, headers={"Content-Type": "application/atom+xml"}
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(
+                entry_frequency_min_interval_seconds=300,
+                entry_frequency_max_interval_seconds=86400,
+                entry_frequency_factor=1,
+            ),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    assert abs(delta - 300) <= 5
+
+
+@pytest.mark.asyncio
+async def test_entry_frequency_quiet_feed_clamped_at_max(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/ef-quiet"
+    feed_id = await _create_feed(sf, feed_url)
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    await _insert_entries(sf, feed_id, [now - timedelta(days=6)])
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200, content=ATOM_BODY, headers={"Content-Type": "application/atom+xml"}
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(
+                entry_frequency_min_interval_seconds=300,
+                entry_frequency_max_interval_seconds=86400,
+                entry_frequency_factor=1,
+            ),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["next_fetch_at"] == now + timedelta(seconds=86400)
+
+
+@pytest.mark.asyncio
+async def test_entry_frequency_broken_feed_ignores_history(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/ef-broken"
+
+    now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=UTC)
+    last_success = now - timedelta(days=1)
+
+    async with sf() as session:
+        feed = Feed(
+            url=feed_url,
+            effective_url=feed_url,
+            status="broken",
+            consecutive_failures=5,
+            last_error_code="http_5xx",
+            last_successful_fetch_at=last_success,
+        )
+        session.add(feed)
+        await session.commit()
+        feed_id = feed.id
+
+    fetched_ats = [now - timedelta(hours=i) for i in range(100)]
+    await _insert_entries(sf, feed_id, fetched_ats)
+
+    respx_mock.get(feed_url).mock(return_value=Response(500))
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=now,
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_kwargs(broken_threshold=3, dead_duration_days=7),
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    delta = (state["next_fetch_at"] - now).total_seconds()
+    assert abs(delta - 864) > 5

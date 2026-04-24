@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from feedgate import ssrf
 from feedgate.fetcher.http import fetch_one
-from feedgate.lifecycle import ErrorCode
+from feedgate.models import ErrorCode
 from feedgate.models import Feed
 from feedgate.ssrf import (
     BlockedURLError,
@@ -329,6 +329,9 @@ async def test_fetch_one_marks_blocked_when_host_resolves_to_private_ip(
             dead_duration_days=fetch_app.state.dead_duration_days,
             broken_max_backoff_seconds=fetch_app.state.broken_max_backoff_seconds,
             backoff_jitter_ratio=fetch_app.state.backoff_jitter_ratio,
+            entry_frequency_min_interval_seconds=fetch_app.state.entry_frequency_min_interval_seconds,
+            entry_frequency_max_interval_seconds=fetch_app.state.entry_frequency_max_interval_seconds,
+            entry_frequency_factor=fetch_app.state.entry_frequency_factor,
         )
         await session.commit()
 

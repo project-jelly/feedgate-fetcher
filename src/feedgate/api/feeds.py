@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.api import get_session
-from feedgate.lifecycle import FeedStatus
+from feedgate.models import FeedStatus
 from feedgate.models import Feed
 from feedgate.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate.ssrf import BlockedURLError, validate_public_url

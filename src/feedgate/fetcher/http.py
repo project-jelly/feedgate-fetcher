@@ -36,12 +36,12 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 import httpx
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.parser import parse_feed
 from feedgate.fetcher.upsert import upsert_entries
-from feedgate.lifecycle import ErrorCode, FeedStatus
+from feedgate.models import ErrorCode, FeedStatus
 from feedgate.models import Entry, Feed
 from feedgate.ssrf import BlockedURLError, validate_public_url
 
@@ -67,13 +67,18 @@ def _compute_next_fetch_at(
     broken_threshold: int,
     broken_max_backoff_seconds: int,
     backoff_jitter_ratio: float,
+    server_hint_seconds: int | None = None,
+    weekly_entry_count: int = 0,
+    entry_frequency_min_interval_seconds: int = 300,
+    entry_frequency_max_interval_seconds: int = 86400,
+    entry_frequency_factor: int = 1,
 ) -> datetime:
     """Pick the next fetch instant based on the feed's current status.
 
-    Active and dead feeds use the plain ``base_interval_seconds``
-    (dead feeds are filtered out by the scheduler anyway, so the
-    value is irrelevant for them, but we still set it for
-    consistency). Broken feeds use exponential backoff:
+    Active and dead feeds use entry_frequency scheduling: feeds that
+    post frequently get polled more often, quiet feeds get polled less
+    often. When no history is available, falls back to
+    ``base_interval_seconds``. Broken feeds use exponential backoff:
 
         excess_failures = max(0, consecutive_failures - broken_threshold)
         factor = 2 ** excess_failures
@@ -86,7 +91,16 @@ def _compute_next_fetch_at(
     transition to broken together due to a shared upstream outage.
     """
     if feed.status != FeedStatus.BROKEN:
-        return now + timedelta(seconds=base_interval_seconds)
+        if weekly_entry_count > 0:
+            raw = (7 * 24 * 3600) / (weekly_entry_count * entry_frequency_factor)
+            computed = max(
+                entry_frequency_min_interval_seconds,
+                min(raw, entry_frequency_max_interval_seconds),
+            )
+        else:
+            computed = float(base_interval_seconds)
+        effective = max(computed, server_hint_seconds or 0)
+        return now + timedelta(seconds=effective)
 
     excess = max(0, feed.consecutive_failures - broken_threshold)
     factor = 2**excess
@@ -172,6 +186,28 @@ def _parse_retry_after(header: str | None, *, now: datetime) -> int | None:
     return max(0, int(delta_seconds))
 
 
+def _parse_cache_hint(headers: httpx.Headers, *, now: datetime) -> int | None:
+    """Parse Cache-Control max-age or Expires → seconds from now. Returns None if absent/unparseable."""
+    cc = headers.get("cache-control", "")
+    for part in cc.split(","):
+        stripped = part.strip()
+        if stripped.lower().startswith("max-age="):
+            try:
+                return max(0, int(stripped[8:]))
+            except ValueError:
+                pass
+    expires = headers.get("expires")
+    if expires:
+        try:
+            parsed_dt = parsedate_to_datetime(expires)
+            if parsed_dt.tzinfo is None:
+                parsed_dt = parsed_dt.replace(tzinfo=UTC)
+            return max(0, int((parsed_dt - now).total_seconds()))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _classify_error(exc: BaseException) -> ErrorCode:
     """Map a fetch exception to a short error code."""
     if isinstance(exc, BlockedURLError):
@@ -239,8 +275,21 @@ async def fetch_one(
     dead_duration_days: int,
     broken_max_backoff_seconds: int,
     backoff_jitter_ratio: float,
+    entry_frequency_min_interval_seconds: int,
+    entry_frequency_max_interval_seconds: int,
+    entry_frequency_factor: int,
 ) -> None:
     feed.last_attempt_at = now
+    _server_hint: int | None = None
+
+    cutoff = now - timedelta(days=7)
+    weekly_entry_count_result = await session.execute(
+        select(func.count()).where(
+            Entry.feed_id == feed.id,
+            Entry.fetched_at >= cutoff,
+        )
+    )
+    weekly_entry_count: int = weekly_entry_count_result.scalar_one()
 
     try:
         # Pre-flight SSRF check on the feed's effective URL. This catches
@@ -249,6 +298,13 @@ async def fetch_one(
         # opened. The HTTP transport runs the same check on every
         # redirect hop, so a 302 → private IP is also blocked.
         await validate_public_url(feed.effective_url)
+
+        conditional_headers: dict[str, str] = {}
+        if feed.etag:
+            conditional_headers["If-None-Match"] = feed.etag
+        elif feed.last_modified:
+            conditional_headers["If-Modified-Since"] = feed.last_modified
+
         # Hard total wall-clock budget for the entire fetch — guards
         # against slow-loris streams that drip bytes just under the
         # per-chunk read timeout. ``asyncio.timeout`` raises
@@ -259,10 +315,35 @@ async def fetch_one(
             http_client.stream(
                 "GET",
                 feed.effective_url,
-                headers={"User-Agent": user_agent},
+                headers={"User-Agent": user_agent, **conditional_headers},
                 follow_redirects=True,
             ) as response,
         ):
+            # 304 Not Modified — feed unchanged. Schedule the next fetch
+            # and return early without touching consecutive_failures or status.
+            if response.status_code == 304:
+                if feed.status == FeedStatus.BROKEN:
+                    _log_transition(feed, FeedStatus.ACTIVE, reason="http_304_recovery")
+                    feed.status = FeedStatus.ACTIVE
+                    feed.consecutive_failures = 0
+                    feed.last_error_code = None
+                    feed.last_successful_fetch_at = now
+                _server_hint = _parse_cache_hint(response.headers, now=now)
+                feed.next_fetch_at = _compute_next_fetch_at(
+                    feed,
+                    now=now,
+                    base_interval_seconds=interval_seconds,
+                    broken_threshold=broken_threshold,
+                    broken_max_backoff_seconds=broken_max_backoff_seconds,
+                    backoff_jitter_ratio=backoff_jitter_ratio,
+                    server_hint_seconds=_server_hint,
+                    weekly_entry_count=weekly_entry_count,
+                    entry_frequency_min_interval_seconds=entry_frequency_min_interval_seconds,
+                    entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
+                    entry_frequency_factor=entry_frequency_factor,
+                )
+                return
+
             # 429 Rate Limited is NOT a circuit-breaker failure
             # (spec/feed.md). Honor Retry-After, record the code,
             # leave consecutive_failures and status alone, and bail
@@ -321,6 +402,16 @@ async def fetch_one(
         if feed.status != FeedStatus.ACTIVE:
             _log_transition(feed, FeedStatus.ACTIVE, reason="fetch_succeeded")
             feed.status = FeedStatus.ACTIVE
+
+        new_etag = response.headers.get("etag")
+        new_last_modified = response.headers.get("last-modified")
+        if new_etag is not None:
+            feed.etag = new_etag
+        if new_last_modified is not None:
+            feed.last_modified = new_last_modified
+        _server_hint = _parse_cache_hint(response.headers, now=now)
+        if parsed.ttl_seconds is not None and parsed.ttl_seconds > 0:
+            _server_hint = max(_server_hint or 0, parsed.ttl_seconds) or None
     except Exception as exc:
         code = _classify_error(exc)
         feed.last_error_code = code
@@ -373,4 +464,9 @@ async def fetch_one(
         broken_threshold=broken_threshold,
         broken_max_backoff_seconds=broken_max_backoff_seconds,
         backoff_jitter_ratio=backoff_jitter_ratio,
+        server_hint_seconds=_server_hint,
+        weekly_entry_count=weekly_entry_count,
+        entry_frequency_min_interval_seconds=entry_frequency_min_interval_seconds,
+        entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
+        entry_frequency_factor=entry_frequency_factor,
     )

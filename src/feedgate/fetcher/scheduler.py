@@ -38,7 +38,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate.fetcher.http import fetch_one
-from feedgate.lifecycle import FeedStatus
+from feedgate.models import FeedStatus
 from feedgate.models import Feed
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,9 @@ async def _process_feed(
     dead_duration_days = app.state.dead_duration_days
     broken_max_backoff_seconds = app.state.broken_max_backoff_seconds
     backoff_jitter_ratio = app.state.backoff_jitter_ratio
+    entry_frequency_min_interval_seconds = app.state.entry_frequency_min_interval_seconds
+    entry_frequency_max_interval_seconds = app.state.entry_frequency_max_interval_seconds
+    entry_frequency_factor = app.state.entry_frequency_factor
 
     async with sem, sf() as session:
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
@@ -106,6 +109,9 @@ async def _process_feed(
                     dead_duration_days=dead_duration_days,
                     broken_max_backoff_seconds=broken_max_backoff_seconds,
                     backoff_jitter_ratio=backoff_jitter_ratio,
+                    entry_frequency_min_interval_seconds=entry_frequency_min_interval_seconds,
+                    entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
+                    entry_frequency_factor=entry_frequency_factor,
                 )
             await session.commit()
         except Exception:
