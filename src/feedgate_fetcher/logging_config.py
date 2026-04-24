@@ -7,6 +7,13 @@ import logging
 import structlog
 
 
+class _HealthzFilter(logging.Filter):
+    """Drop uvicorn.access records for /healthz — probe noise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/healthz" not in record.getMessage()
+
+
 def configure_logging(log_level: str = "INFO", json_logs: bool = False) -> None:
     """Configure stdlib logging + structlog with one unified pipeline."""
     level_name = log_level.upper()
@@ -40,19 +47,26 @@ def configure_logging(log_level: str = "INFO", json_logs: bool = False) -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
-    for logger_name in (
-        "uvicorn",
-        "uvicorn.error",
-        "uvicorn.access",
-        "fastapi",
-        "sqlalchemy",
-        "sqlalchemy.engine",
-        "sqlalchemy.pool",
-    ):
-        external_logger = logging.getLogger(logger_name)
-        external_logger.handlers.clear()
-        external_logger.propagate = True
-        external_logger.setLevel(level)
+    for logger_name in ("uvicorn", "uvicorn.error", "fastapi"):
+        lg = logging.getLogger(logger_name)
+        lg.handlers.clear()
+        lg.propagate = True
+        lg.setLevel(level)
+
+    # Access log: suppress /healthz probe noise
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.handlers.clear()
+    access_logger.propagate = True
+    access_logger.setLevel(level)
+    access_logger.addFilter(_HealthzFilter())
+
+    # SQLAlchemy: WARNING suppresses per-query echo (engine echo=False is not enough
+    # when the root logger is at INFO — the engine logger still propagates).
+    for logger_name in ("sqlalchemy", "sqlalchemy.engine", "sqlalchemy.pool"):
+        lg = logging.getLogger(logger_name)
+        lg.handlers.clear()
+        lg.propagate = True
+        lg.setLevel(logging.WARNING)
 
     structlog.configure(
         processors=[
