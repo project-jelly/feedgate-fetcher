@@ -32,6 +32,7 @@ import logging
 import random
 import socket
 import ssl
+import time
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
@@ -279,6 +280,7 @@ async def fetch_one(
     entry_frequency_max_interval_seconds: int,
     entry_frequency_factor: int,
 ) -> None:
+    _t0 = time.perf_counter()
     feed.last_attempt_at = now
     _server_hint: int | None = None
 
@@ -342,6 +344,10 @@ async def fetch_one(
                     entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
                     entry_frequency_factor=entry_frequency_factor,
                 )
+                from feedgate.metrics import FETCH_DURATION, FETCH_TOTAL
+
+                FETCH_TOTAL.labels(result="not_modified").inc()
+                FETCH_DURATION.labels(result="not_modified").observe(time.perf_counter() - _t0)
                 return
 
             # 429 Rate Limited is NOT a circuit-breaker failure
@@ -357,6 +363,10 @@ async def fetch_one(
                 wait_seconds = max(wait_seconds, interval_seconds)
                 feed.last_error_code = ErrorCode.RATE_LIMITED
                 feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
+                from feedgate.metrics import FETCH_DURATION, FETCH_TOTAL
+
+                FETCH_TOTAL.labels(result="rate_limited").inc()
+                FETCH_DURATION.labels(result="rate_limited").observe(time.perf_counter() - _t0)
                 return
 
             response.raise_for_status()
@@ -412,6 +422,10 @@ async def fetch_one(
         _server_hint = _parse_cache_hint(response.headers, now=now)
         if parsed.ttl_seconds is not None and parsed.ttl_seconds > 0:
             _server_hint = max(_server_hint or 0, parsed.ttl_seconds) or None
+        from feedgate.metrics import FETCH_DURATION, FETCH_TOTAL
+
+        FETCH_TOTAL.labels(result="success").inc()
+        FETCH_DURATION.labels(result="success").observe(time.perf_counter() - _t0)
     except Exception as exc:
         code = _classify_error(exc)
         feed.last_error_code = code
@@ -423,6 +437,11 @@ async def fetch_one(
             code,
             exc,
         )
+        from feedgate.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
+
+        FETCH_TOTAL.labels(result="error").inc()
+        FETCH_ERROR_TOTAL.labels(error_code=code).inc()
+        FETCH_DURATION.labels(result="error").observe(time.perf_counter() - _t0)
 
         # Lifecycle transitions (spec/feed.md — circuit breaker + 410)
         if code == ErrorCode.HTTP_410:

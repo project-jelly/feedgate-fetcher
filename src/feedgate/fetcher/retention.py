@@ -104,6 +104,10 @@ async def tick_once(
                 min_per_feed=min_per_feed,
             )
             await session.commit()
+            if n > 0:
+                from feedgate.metrics import RETENTION_DELETED_TOTAL
+
+                RETENTION_DELETED_TOTAL.inc(n)
             return n
         except Exception:
             await session.rollback()

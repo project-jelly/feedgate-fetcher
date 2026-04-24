@@ -11,6 +11,7 @@ pytest) must set before the app handles any request.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
 from typing import cast
@@ -18,7 +19,9 @@ from typing import cast
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.responses import Response
 from starlette.types import ExceptionHandler
 
 # ---------------------------------------------------------------------------
@@ -159,9 +162,41 @@ def register_exception_handlers(app: FastAPI) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _add_metrics_middleware(app: FastAPI) -> None:
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+
+    class MetricsMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
+            if request.url.path == "/metrics":
+                return await call_next(request)
+            t0 = time.perf_counter()
+            response = await call_next(request)
+            duration = time.perf_counter() - t0
+            route = request.scope.get("route")
+            path = route.path if route else request.url.path
+            from feedgate.metrics import API_DURATION, API_REQUESTS_TOTAL
+
+            API_REQUESTS_TOTAL.labels(
+                method=request.method,
+                path=path,
+                status_code=str(response.status_code),
+            ).inc()
+            API_DURATION.labels(method=request.method, path=path).observe(duration)
+            return response
+
+    app.add_middleware(MetricsMiddleware)
+
+
 def register_routers(app: FastAPI) -> None:
     """Mount all routers onto ``app``."""
     from feedgate.api import entries, feeds
+
+    _add_metrics_middleware(app)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(_health_router)
     app.include_router(feeds.router, dependencies=[Depends(require_api_key)])

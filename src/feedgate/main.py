@@ -33,6 +33,7 @@ from feedgate.fetcher import retention
 from feedgate.api import register_exception_handlers, register_routers
 from feedgate.config import get_settings
 from feedgate.fetcher import scheduler
+from feedgate import metrics as _metrics
 from feedgate.ssrf import SSRFGuardTransport
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,10 @@ def create_app() -> FastAPI:
             )
         else:
             logger.info("retention disabled via FEEDGATE_RETENTION_ENABLED=false")
+        collector_stop = asyncio.Event()
+        collector_task = asyncio.create_task(
+            _metrics.run_collector(session_factory, engine, stop_event=collector_stop)
+        )
         try:
             yield
         finally:
@@ -180,6 +185,12 @@ def create_app() -> FastAPI:
                 retention_stop,
                 name="retention",
                 drain_seconds=drain_budget,
+            )
+            await _drain_background_task(
+                collector_task,
+                collector_stop,
+                name="metrics_collector",
+                drain_seconds=5.0,
             )
             await http_client.aclose()
             await engine.dispose()
