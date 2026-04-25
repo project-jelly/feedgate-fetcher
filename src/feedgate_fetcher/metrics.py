@@ -67,6 +67,11 @@ FEEDS_BY_STATUS = Gauge(
     "Number of feeds by lifecycle status",
     ["status"],
 )
+FEED_STATE_TRANSITION_TOTAL = Counter(
+    "feedgate_feed_state_transition_total",
+    "Feed lifecycle state transitions",
+    ["from_status", "to_status", "reason"],
+)
 ENTRIES_TOTAL = Gauge(
     "feedgate_entries_total",
     "Total number of stored entries",

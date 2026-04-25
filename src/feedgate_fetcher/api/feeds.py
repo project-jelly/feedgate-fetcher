@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate_fetcher.api import get_session
 from feedgate_fetcher.config import get_settings
+from feedgate_fetcher.metrics import FEED_STATE_TRANSITION_TOTAL
 from feedgate_fetcher.models import Feed, FeedStatus
 from feedgate_fetcher.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
@@ -196,6 +197,11 @@ async def reactivate_feed(
             new_status=FeedStatus.ACTIVE,
             reason="manual_reactivate",
         )
+        FEED_STATE_TRANSITION_TOTAL.labels(
+            from_status=str(feed.status),
+            to_status=str(FeedStatus.ACTIVE),
+            reason="manual_reactivate",
+        ).inc()
 
     feed.status = FeedStatus.ACTIVE
     feed.consecutive_failures = 0
