@@ -7,6 +7,7 @@ Covers plan WPs 3.1 (POST), 3.2 (POST idempotency), 3.3 (GET list),
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -71,6 +72,21 @@ async def test_post_feed_is_idempotent(api_client: AsyncClient) -> None:
     )
     assert second.status_code == 200
     assert second.json()["id"] == first_id
+
+
+@pytest.mark.asyncio
+async def test_post_feed_schedules_immediate_fetch(
+    api_client: AsyncClient,
+    async_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    url = "http://immediate.test/feed.xml"
+    resp = await api_client.post("/v1/feeds", json={"url": url})
+    assert resp.status_code == 201, resp.text
+
+    async with async_session_factory() as session:
+        row = (await session.execute(select(Feed).where(Feed.url == url))).scalar_one()
+
+    assert abs(row.next_fetch_at - datetime.now(UTC)) < timedelta(seconds=1)
 
 
 @pytest.mark.asyncio

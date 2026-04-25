@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-import random
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 
@@ -89,7 +88,6 @@ async def create_feed(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Feed:
-    interval = request.app.state.fetch_interval_seconds
     del request  # required by slowapi decorator
     url = normalize_url(str(payload.url))
 
@@ -103,10 +101,9 @@ async def create_feed(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"blocked_url: {exc}",
         ) from exc
-    jitter = timedelta(seconds=random.randint(0, interval))
     stmt = (
         pg_insert(Feed)
-        .values(url=url, effective_url=url, next_fetch_at=datetime.now(UTC) + jitter)
+        .values(url=url, effective_url=url, next_fetch_at=datetime.now(UTC))
         .on_conflict_do_nothing(index_elements=["url"])
         .returning(Feed.id)
     )
