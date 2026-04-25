@@ -375,6 +375,43 @@ async def test_fetch_one_rejects_html_content_type_as_not_a_feed(
     assert await _count_entries_for_feed(sf, feed_id) == 0
 
 
+@pytest.mark.asyncio
+async def test_fetch_one_accepts_text_plain_content_type_with_valid_xml_body(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://t.test/text-plain-valid-feed"
+    feed_id = await _create_feed(sf, feed_url)
+
+    respx_mock.get(feed_url).mock(
+        return_value=Response(
+            200,
+            content=_RSS_TTL_120,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+        )
+    )
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] is None
+    assert state["last_successful_fetch_at"] is not None
+    assert state["consecutive_failures"] == 0
+    assert await _count_entries_for_feed(sf, feed_id) > 0
+
+
 MANY_ATOM_ENTRIES = b"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <title>Many entries feed</title>

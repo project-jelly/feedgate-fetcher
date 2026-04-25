@@ -121,13 +121,15 @@ def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
 # We intentionally do NOT maintain an allow-list because many feeds
 # serve odd values like ``application/octet-stream`` (Python Insider)
 # or omit the header entirely; feedparser handles those just fine.
+# ``text/plain`` is also allowed: GitHub raw URLs always serve files
+# that way under their nosniff policy, while the body can still be valid
+# RSS/Atom XML that feedparser parses correctly.
 NOT_A_FEED_CONTENT_TYPES: frozenset[str] = frozenset(
     {
         "text/html",
         "application/xhtml+xml",
         "application/json",
         "application/ld+json",
-        "text/plain",
     }
 )
 
