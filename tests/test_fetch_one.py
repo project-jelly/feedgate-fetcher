@@ -20,8 +20,11 @@ from httpx import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import feedgate_fetcher.fetcher.http as fetch_http
 from feedgate_fetcher.config import Settings
+from feedgate_fetcher.fetcher.fallback import FallbackError, FallbackResponse
 from feedgate_fetcher.fetcher.http import (
+    _DOMAINS_NEEDING_FALLBACK,
     _classify_error,
     _compute_next_fetch_at,
     _parse_retry_after,
@@ -279,6 +282,100 @@ async def test_fetch_one_http_404_records_error_without_raising(
     assert state["consecutive_failures"] == 1
     assert state["status"] == "active"  # no state machine in walking skeleton
     assert await _count_entries_for_feed(sf, feed_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_falls_back_to_impersonation_on_403(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://example.com/feed"
+    feed_id = await _create_feed(sf, feed_url)
+    _DOMAINS_NEEDING_FALLBACK.clear()
+
+    respx_mock.get(feed_url).mock(return_value=Response(403))
+
+    async def fake_fetch_via_impersonation(
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout_seconds: float,
+        max_bytes: int,
+    ) -> FallbackResponse:
+        return FallbackResponse(
+            status_code=200,
+            headers=httpx.Headers([]),
+            content=ATOM_BODY,
+            url=url,
+        )
+
+    monkeypatch.setattr(fetch_http, "fetch_via_impersonation", fake_fetch_via_impersonation)
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] is None
+    assert state["consecutive_failures"] == 0
+    assert state["status"] == "active"
+    assert await _count_entries_for_feed(sf, feed_id) == 2
+    assert "example.com" in _DOMAINS_NEEDING_FALLBACK
+    _DOMAINS_NEEDING_FALLBACK.clear()
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_records_4xx_when_fallback_also_fails(
+    fetch_app: FastAPI,
+    respx_mock: respx.Router,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf: async_sessionmaker[AsyncSession] = fetch_app.state.session_factory
+    feed_url = "http://example.com/blocked-feed"
+    feed_id = await _create_feed(sf, feed_url)
+    _DOMAINS_NEEDING_FALLBACK.clear()
+
+    respx_mock.get(feed_url).mock(return_value=Response(403))
+
+    async def fake_fetch_via_impersonation(
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout_seconds: float,
+        max_bytes: int,
+    ) -> FallbackResponse:
+        raise FallbackError("blocked")
+
+    monkeypatch.setattr(fetch_http, "fetch_via_impersonation", fake_fetch_via_impersonation)
+
+    async with sf() as session:
+        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one()
+        await fetch_one(
+            session,
+            fetch_app.state.http_client,
+            feed,
+            now=datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC),
+            interval_seconds=60,
+            user_agent="test-agent",
+            **_FETCH_DEFAULTS,
+        )
+        await session.commit()
+
+    state = await _load_feed(sf, feed_id)
+    assert state["last_error_code"] == ErrorCode.HTTP_4XX
+    assert state["consecutive_failures"] == 1
+    assert "example.com" not in _DOMAINS_NEEDING_FALLBACK
 
 
 @pytest.mark.asyncio
