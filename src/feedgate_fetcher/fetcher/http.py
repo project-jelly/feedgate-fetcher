@@ -36,7 +36,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate_fetcher.fetcher.parser import parse_feed
 from feedgate_fetcher.fetcher.upsert import upsert_entries
-from feedgate_fetcher.metrics import FETCH_DURATION, FETCH_ERROR_TOTAL, FETCH_TOTAL
+from feedgate_fetcher.metrics import (
+    FEED_STATE_TRANSITION_TOTAL,
+    FETCH_DURATION,
+    FETCH_ERROR_TOTAL,
+    FETCH_TOTAL,
+)
 from feedgate_fetcher.models import Entry, ErrorCode, Feed, FeedStatus
 from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
@@ -107,7 +112,17 @@ def _compute_next_fetch_at(
 
 
 def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
-    logger.warning(
+    FEED_STATE_TRANSITION_TOTAL.labels(
+        from_status=str(feed.status),
+        to_status=str(new_status),
+        reason=reason,
+    ).inc()
+    log = (
+        logger.error
+        if str(new_status) in {FeedStatus.BROKEN.value, FeedStatus.DEAD.value}
+        else logger.warning
+    )
+    log(
         "feed_state_transition",
         feed_id=feed.id,
         url=feed.effective_url,
