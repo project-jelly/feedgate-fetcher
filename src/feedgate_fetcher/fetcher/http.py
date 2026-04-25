@@ -28,12 +28,18 @@ import ssl
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from feedgate_fetcher.fetcher.fallback import (
+    FallbackError,
+    FallbackResponse,
+    fetch_via_impersonation,
+)
 from feedgate_fetcher.fetcher.parser import parse_feed
 from feedgate_fetcher.fetcher.upsert import upsert_entries
 from feedgate_fetcher.metrics import (
@@ -46,6 +52,8 @@ from feedgate_fetcher.models import Entry, ErrorCode, Feed, FeedStatus
 from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
 logger = structlog.get_logger()
+
+_DOMAINS_NEEDING_FALLBACK: set[str] = set()
 
 
 class NotAFeedError(Exception):
@@ -224,6 +232,11 @@ def _classify_error(exc: BaseException) -> ErrorCode:
         return ErrorCode.NOT_A_FEED
     if isinstance(exc, ResponseTooLargeError):
         return ErrorCode.TOO_LARGE
+    if isinstance(exc, FallbackError):
+        cause = exc.__cause__ or exc.__context__
+        if isinstance(cause, ResponseTooLargeError):
+            return ErrorCode.TOO_LARGE
+        return ErrorCode.OTHER
     if isinstance(exc, httpx.TimeoutException | TimeoutError):
         return ErrorCode.TIMEOUT
     if isinstance(exc, httpx.ConnectError):
@@ -314,84 +327,117 @@ async def fetch_one(
             conditional_headers["If-None-Match"] = feed.etag
         elif feed.last_modified:
             conditional_headers["If-Modified-Since"] = feed.last_modified
+        request_headers = {"User-Agent": user_agent, **conditional_headers}
+        host = urlsplit(feed.effective_url).hostname or ""
 
         # Hard total wall-clock budget for the entire fetch — guards
         # against slow-loris streams that drip bytes just under the
         # per-chunk read timeout. ``asyncio.timeout`` raises
         # ``TimeoutError`` which ``_classify_error`` maps to
         # ``ErrorCode.TIMEOUT``.
-        async with (
-            asyncio.timeout(total_budget_seconds),
-            http_client.stream(
-                "GET",
+        response_headers: httpx.Headers
+        body: bytes
+        if host in _DOMAINS_NEEDING_FALLBACK:
+            cached_fallback_response = await fetch_via_impersonation(
                 feed.effective_url,
-                headers={"User-Agent": user_agent, **conditional_headers},
-                follow_redirects=True,
-            ) as response,
-        ):
-            # 304 Not Modified — feed unchanged. Schedule the next fetch
-            # and return early without touching consecutive_failures or status.
-            if response.status_code == 304:
-                feed.last_successful_fetch_at = now
-                if feed.status == FeedStatus.BROKEN:
-                    _log_transition(feed, FeedStatus.ACTIVE, reason="http_304_recovery")
-                    feed.status = FeedStatus.ACTIVE
-                    feed.consecutive_failures = 0
-                    feed.last_error_code = None
-                _server_hint = _parse_cache_hint(response.headers, now=now)
-                feed.next_fetch_at = _compute_next_fetch_at(
-                    feed,
-                    now=now,
-                    base_interval_seconds=interval_seconds,
-                    broken_threshold=broken_threshold,
-                    broken_max_backoff_seconds=broken_max_backoff_seconds,
-                    backoff_jitter_ratio=backoff_jitter_ratio,
-                    server_hint_seconds=_server_hint,
-                    weekly_entry_count=weekly_entry_count,
-                    entry_frequency_min_interval_seconds=entry_frequency_min_interval_seconds,
-                    entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
-                    entry_frequency_factor=entry_frequency_factor,
-                )
-                FETCH_TOTAL.labels(result="not_modified").inc()
-                FETCH_DURATION.labels(result="not_modified").observe(time.perf_counter() - _t0)
-                return
+                headers=request_headers,
+                timeout_seconds=total_budget_seconds,
+                max_bytes=max_bytes,
+            )
+            response_headers = cached_fallback_response.headers
+            body = cached_fallback_response.content
+        else:
+            async with (
+                asyncio.timeout(total_budget_seconds),
+                http_client.stream(
+                    "GET",
+                    feed.effective_url,
+                    headers=request_headers,
+                    follow_redirects=True,
+                ) as response,
+            ):
+                # 304 Not Modified — feed unchanged. Schedule the next fetch
+                # and return early without touching consecutive_failures or status.
+                if response.status_code == 304:
+                    feed.last_successful_fetch_at = now
+                    if feed.status == FeedStatus.BROKEN:
+                        _log_transition(feed, FeedStatus.ACTIVE, reason="http_304_recovery")
+                        feed.status = FeedStatus.ACTIVE
+                        feed.consecutive_failures = 0
+                        feed.last_error_code = None
+                    _server_hint = _parse_cache_hint(response.headers, now=now)
+                    feed.next_fetch_at = _compute_next_fetch_at(
+                        feed,
+                        now=now,
+                        base_interval_seconds=interval_seconds,
+                        broken_threshold=broken_threshold,
+                        broken_max_backoff_seconds=broken_max_backoff_seconds,
+                        backoff_jitter_ratio=backoff_jitter_ratio,
+                        server_hint_seconds=_server_hint,
+                        weekly_entry_count=weekly_entry_count,
+                        entry_frequency_min_interval_seconds=entry_frequency_min_interval_seconds,
+                        entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
+                        entry_frequency_factor=entry_frequency_factor,
+                    )
+                    FETCH_TOTAL.labels(result="not_modified").inc()
+                    FETCH_DURATION.labels(result="not_modified").observe(time.perf_counter() - _t0)
+                    return
 
-            # 429 Rate Limited is NOT a circuit-breaker failure
-            # (spec/feed.md). Honor Retry-After, record the code,
-            # leave consecutive_failures and status alone, and bail
-            # out of fetch_one early. We do NOT update
-            # last_successful_fetch_at because we didn't succeed.
-            if response.status_code == 429:
-                retry_after = _parse_retry_after(response.headers.get("retry-after"), now=now)
-                wait_seconds = retry_after if retry_after is not None else 0
-                # Floor at base interval — don't hammer the upstream
-                # faster than our normal poll rate even if it says "10s".
-                wait_seconds = max(wait_seconds, interval_seconds)
-                feed.last_error_code = ErrorCode.RATE_LIMITED
-                feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
-                FETCH_TOTAL.labels(result="rate_limited").inc()
-                FETCH_DURATION.labels(result="rate_limited").observe(time.perf_counter() - _t0)
-                return
+                # 429 Rate Limited is NOT a circuit-breaker failure
+                # (spec/feed.md). Honor Retry-After, record the code,
+                # leave consecutive_failures and status alone, and bail
+                # out of fetch_one early. We do NOT update
+                # last_successful_fetch_at because we didn't succeed.
+                if response.status_code == 429:
+                    retry_after = _parse_retry_after(response.headers.get("retry-after"), now=now)
+                    wait_seconds = retry_after if retry_after is not None else 0
+                    # Floor at base interval — don't hammer the upstream
+                    # faster than our normal poll rate even if it says "10s".
+                    wait_seconds = max(wait_seconds, interval_seconds)
+                    feed.last_error_code = ErrorCode.RATE_LIMITED
+                    feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
+                    FETCH_TOTAL.labels(result="rate_limited").inc()
+                    FETCH_DURATION.labels(result="rate_limited").observe(time.perf_counter() - _t0)
+                    return
 
-            response.raise_for_status()
-            permanent_moved = any(h.status_code == 301 for h in response.history)
-            if permanent_moved:
-                final_url = str(response.url)
-                if final_url != feed.effective_url:
-                    feed.effective_url = final_url
+                fallback_response: FallbackResponse | None = None
+                if response.status_code == 403:
+                    try:
+                        fallback_response = await fetch_via_impersonation(
+                            feed.effective_url,
+                            headers=request_headers,
+                            timeout_seconds=total_budget_seconds,
+                            max_bytes=max_bytes,
+                        )
+                    except FallbackError:
+                        response.raise_for_status()
+                    else:
+                        _DOMAINS_NEEDING_FALLBACK.add(host)
 
-            ct = response.headers.get("content-type")
-            if _is_not_a_feed_content_type(ct):
-                raise NotAFeedError(f"unexpected content-type: {ct}")
+                if fallback_response is None:
+                    response.raise_for_status()
+                    permanent_moved = any(h.status_code == 301 for h in response.history)
+                    if permanent_moved:
+                        final_url = str(response.url)
+                        if final_url != feed.effective_url:
+                            feed.effective_url = final_url
 
-            body_parts: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                body_parts.append(chunk)
-                size += len(chunk)
-                if size > max_bytes:
-                    raise ResponseTooLargeError(f"body exceeded {max_bytes} bytes")
-            body = b"".join(body_parts)
+                    response_headers = response.headers
+                    body_parts: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        body_parts.append(chunk)
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise ResponseTooLargeError(f"body exceeded {max_bytes} bytes")
+                    body = b"".join(body_parts)
+                else:
+                    response_headers = fallback_response.headers
+                    body = fallback_response.content
+
+        ct = response_headers.get("content-type")
+        if _is_not_a_feed_content_type(ct):
+            raise NotAFeedError(f"unexpected content-type: {ct}")
 
         parsed = await parse_feed(body)
         entries_to_upsert = parsed.entries
@@ -419,13 +465,13 @@ async def fetch_one(
             _log_transition(feed, FeedStatus.ACTIVE, reason="fetch_succeeded")
             feed.status = FeedStatus.ACTIVE
 
-        new_etag = response.headers.get("etag")
-        new_last_modified = response.headers.get("last-modified")
+        new_etag = response_headers.get("etag")
+        new_last_modified = response_headers.get("last-modified")
         if new_etag is not None:
             feed.etag = new_etag
         if new_last_modified is not None:
             feed.last_modified = new_last_modified
-        _server_hint = _parse_cache_hint(response.headers, now=now)
+        _server_hint = _parse_cache_hint(response_headers, now=now)
         if parsed.ttl_seconds is not None and parsed.ttl_seconds > 0:
             _server_hint = max(_server_hint or 0, parsed.ttl_seconds) or None
         FETCH_TOTAL.labels(result="success").inc()
