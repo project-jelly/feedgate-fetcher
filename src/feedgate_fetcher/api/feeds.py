@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -24,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate_fetcher.api import get_session
 from feedgate_fetcher.config import get_settings
-from feedgate_fetcher.metrics import FEED_STATE_TRANSITION_TOTAL
+from feedgate_fetcher.feed_state import transition_feed
 from feedgate_fetcher.models import Feed, FeedStatus
 from feedgate_fetcher.schemas import FeedCreate, FeedResponse, PaginatedFeeds
 from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
@@ -47,8 +46,6 @@ def normalize_url(raw: str) -> str:
         path = ""
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
 
-
-logger = structlog.get_logger()
 
 router = APIRouter(prefix="/v1/feeds", tags=["feeds"])
 limiter = Limiter(key_func=get_remote_address)
@@ -189,19 +186,7 @@ async def reactivate_feed(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="feed not found")
 
     if feed.status != FeedStatus.ACTIVE:
-        logger.warning(
-            "feed_state_transition",
-            feed_id=feed.id,
-            url=feed.effective_url,
-            old_status=feed.status,
-            new_status=FeedStatus.ACTIVE,
-            reason="manual_reactivate",
-        )
-        FEED_STATE_TRANSITION_TOTAL.labels(
-            from_status=str(feed.status),
-            to_status=str(FeedStatus.ACTIVE),
-            reason="manual_reactivate",
-        ).inc()
+        transition_feed(feed, FeedStatus.ACTIVE, reason="manual_reactivate")
 
     feed.status = FeedStatus.ACTIVE
     feed.consecutive_failures = 0
