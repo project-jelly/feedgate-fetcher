@@ -28,6 +28,8 @@ The app reads its state from ``app.state``:
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -41,12 +43,22 @@ from feedgate_fetcher.models import Feed, FeedStatus
 logger = structlog.get_logger()
 
 
+@dataclass(frozen=True)
+class SchedulerTickResult:
+    """Outcome of one scheduler.tick_once invocation."""
+
+    claimed: int
+    processed: int
+    fatal_errors: int
+    duration_seconds: float
+
+
 async def _process_feed(
     feed_id: int,
     app: FastAPI,
     sem: asyncio.Semaphore,
     now: datetime,
-) -> None:
+) -> bool:
     """Open a fresh session, load the feed, run fetch_one, commit."""
     sf = app.state.session_factory
     http_client = app.state.http_client
@@ -54,7 +66,7 @@ async def _process_feed(
     async with sem, sf() as session:
         feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
         if feed is None:
-            return
+            return True
         try:
             await fetch_one(
                 session,
@@ -76,9 +88,11 @@ async def _process_feed(
                 entry_frequency_factor=app.state.entry_frequency_factor,
             )
             await session.commit()
+            return True
         except Exception:
             await session.rollback()
             logger.exception("fatal error in _process_feed feed_id=%s", feed_id)
+            return False
 
 
 async def _claim_due_feeds(
@@ -142,7 +156,7 @@ async def _claim_due_feeds(
     return claimed_ids
 
 
-async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
+async def tick_once(app: FastAPI, *, now: datetime | None = None) -> SchedulerTickResult:
     """Run one scheduler iteration against a Postgres-as-queue.
 
     Step 1 — claim: open a session, ``SELECT ... FOR UPDATE SKIP
@@ -155,6 +169,7 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
     call ``fetch_one`` under a bounded semaphore. Each fetch is
     isolated, so one failing feed cannot poison the others.
     """
+    started_at = time.perf_counter()
     now = now or datetime.now(UTC)
     sf = app.state.session_factory
     async with sf() as session:
@@ -167,11 +182,25 @@ async def tick_once(app: FastAPI, *, now: datetime | None = None) -> None:
         )
         await session.commit()
 
+    claimed = len(feed_ids)
     if not feed_ids:
-        return
+        return SchedulerTickResult(
+            claimed=0,
+            processed=0,
+            fatal_errors=0,
+            duration_seconds=time.perf_counter() - started_at,
+        )
 
     sem = asyncio.Semaphore(app.state.fetch_concurrency)
-    await asyncio.gather(*(_process_feed(fid, app, sem, now) for fid in feed_ids))
+    outcomes = await asyncio.gather(*(_process_feed(fid, app, sem, now) for fid in feed_ids))
+    processed = sum(1 for ok in outcomes if ok)
+    fatal_errors = sum(1 for ok in outcomes if not ok)
+    return SchedulerTickResult(
+        claimed=claimed,
+        processed=processed,
+        fatal_errors=fatal_errors,
+        duration_seconds=time.perf_counter() - started_at,
+    )
 
 
 async def run(
