@@ -43,11 +43,7 @@ from feedgate_fetcher.fetcher.fallback import (
 )
 from feedgate_fetcher.fetcher.parser import parse_feed
 from feedgate_fetcher.fetcher.upsert import upsert_entries
-from feedgate_fetcher.metrics import (
-    FETCH_DURATION,
-    FETCH_ERROR_TOTAL,
-    FETCH_TOTAL,
-)
+from feedgate_fetcher.metrics import observe_fetch
 from feedgate_fetcher.models import Entry, ErrorCode, Feed, FeedStatus
 from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
 
@@ -358,8 +354,7 @@ async def fetch_one(
                         entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
                         entry_frequency_factor=entry_frequency_factor,
                     )
-                    FETCH_TOTAL.labels(result="not_modified").inc()
-                    FETCH_DURATION.labels(result="not_modified").observe(time.perf_counter() - _t0)
+                    observe_fetch("not_modified", _t0)
                     return
 
                 # 429 Rate Limited is NOT a circuit-breaker failure
@@ -375,8 +370,7 @@ async def fetch_one(
                     wait_seconds = max(wait_seconds, interval_seconds)
                     feed.last_error_code = ErrorCode.RATE_LIMITED
                     feed.next_fetch_at = now + timedelta(seconds=wait_seconds)
-                    FETCH_TOTAL.labels(result="rate_limited").inc()
-                    FETCH_DURATION.labels(result="rate_limited").observe(time.perf_counter() - _t0)
+                    observe_fetch("rate_limited", _t0)
                     return
 
                 fallback_response: FallbackResponse | None = None
@@ -446,8 +440,7 @@ async def fetch_one(
         _server_hint = _parse_cache_hint(response_headers, now=now)
         if parsed.ttl_seconds is not None and parsed.ttl_seconds > 0:
             _server_hint = max(_server_hint or 0, parsed.ttl_seconds) or None
-        FETCH_TOTAL.labels(result="success").inc()
-        FETCH_DURATION.labels(result="success").observe(time.perf_counter() - _t0)
+        observe_fetch("success", _t0)
     except Exception as exc:
         code = _classify_error(exc)
         mark_fetch_failure(
@@ -464,9 +457,7 @@ async def fetch_one(
             code,
             exc,
         )
-        FETCH_TOTAL.labels(result="error").inc()
-        FETCH_ERROR_TOTAL.labels(error_code=code).inc()
-        FETCH_DURATION.labels(result="error").observe(time.perf_counter() - _t0)
+        observe_fetch("error", _t0, error_code=code)
 
     # Schedule the next fetch based on the final status. Active feeds
     # use base_interval_seconds; broken feeds use exponential backoff

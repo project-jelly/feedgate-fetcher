@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 
 import structlog
@@ -10,7 +11,7 @@ from prometheus_client import Counter, Gauge, Histogram
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from feedgate_fetcher.models import Entry, Feed, FeedStatus
+from feedgate_fetcher.models import Entry, ErrorCode, Feed, FeedStatus
 
 logger = structlog.get_logger()
 
@@ -31,6 +32,25 @@ FETCH_DURATION = Histogram(
     ["result"],
     buckets=[0.5, 1, 2, 5, 10, 15, 20, 30],
 )
+
+
+def observe_fetch(
+    result: str,
+    started_at: float,
+    *,
+    error_code: ErrorCode | None = None,
+) -> None:
+    """Record FETCH_TOTAL/FETCH_DURATION (and FETCH_ERROR_TOTAL when applicable).
+
+    `started_at` is a value from `time.perf_counter()` at the start of the fetch.
+    `error_code` is required when `result == 'error'` (FETCH_ERROR_TOTAL also incs).
+    """
+    elapsed = time.perf_counter() - started_at
+    FETCH_TOTAL.labels(result=result).inc()
+    FETCH_DURATION.labels(result=result).observe(elapsed)
+    if error_code is not None:
+        FETCH_ERROR_TOTAL.labels(error_code=error_code).inc()
+
 
 # ── RED: API ─────────────────────────────────────────────────────────────────
 API_REQUESTS_TOTAL = Counter(
