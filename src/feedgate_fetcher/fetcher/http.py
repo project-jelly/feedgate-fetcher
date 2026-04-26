@@ -22,12 +22,8 @@ On failure:
 from __future__ import annotations
 
 import asyncio
-import random
-import socket
-import ssl
 import time
-from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 import httpx
@@ -36,224 +32,37 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate_fetcher.feed_state import mark_fetch_failure, mark_fetch_success, transition_feed
+from feedgate_fetcher.fetcher.errors import (
+    NotAFeedError,
+    ResponseTooLargeError,
+    classify_error,
+)
 from feedgate_fetcher.fetcher.fallback import (
     FallbackError,
     FallbackResponse,
     fetch_via_impersonation,
 )
 from feedgate_fetcher.fetcher.parser import parse_feed
+from feedgate_fetcher.fetcher.policy import (
+    compute_next_fetch_at,
+    is_not_a_feed_content_type,
+    parse_cache_hint,
+    parse_retry_after,
+)
 from feedgate_fetcher.fetcher.upsert import upsert_entries
 from feedgate_fetcher.metrics import observe_fetch
 from feedgate_fetcher.models import Entry, ErrorCode, Feed, FeedStatus
-from feedgate_fetcher.ssrf import BlockedURLError, validate_public_url
+from feedgate_fetcher.ssrf import validate_public_url
 
 logger = structlog.get_logger()
 
 _DOMAINS_NEEDING_FALLBACK: set[str] = set()
 
-
-class NotAFeedError(Exception):
-    """Raised when a 200 OK response carries a Content-Type that is
-    clearly not an RSS/Atom/XML feed (html, json, plain text)."""
-
-
-class ResponseTooLargeError(Exception):
-    """Raised when the streamed response body exceeds the configured
-    size cap (``FETCH_MAX_BYTES``). Raised mid-stream so we never load
-    the full oversized body into memory."""
-
-
-def _compute_next_fetch_at(
-    feed: Feed,
-    *,
-    now: datetime,
-    base_interval_seconds: int,
-    broken_threshold: int,
-    broken_max_backoff_seconds: int,
-    backoff_jitter_ratio: float,
-    server_hint_seconds: int | None = None,
-    weekly_entry_count: int = 0,
-    entry_frequency_min_interval_seconds: int = 300,
-    entry_frequency_max_interval_seconds: int = 86400,
-    entry_frequency_factor: int = 1,
-) -> datetime:
-    """Pick the next fetch instant based on the feed's current status.
-
-    Active and dead feeds use entry_frequency scheduling: feeds that
-    post frequently get polled more often, quiet feeds get polled less
-    often. When no history is available, falls back to
-    ``base_interval_seconds``. Broken feeds use exponential backoff:
-
-        excess_failures = max(0, consecutive_failures - broken_threshold)
-        factor = 2 ** excess_failures
-        raw = base_interval_seconds * factor
-        capped = min(raw, broken_max_backoff_seconds)
-        jitter = uniform(-ratio, +ratio) * capped
-        next = now + (capped + jitter) seconds
-
-    The jitter prevents thundering-herd recovery when many feeds
-    transition to broken together due to a shared upstream outage.
-    """
-    if feed.status != FeedStatus.BROKEN:
-        if weekly_entry_count > 0:
-            raw = (7 * 24 * 3600) / (weekly_entry_count * entry_frequency_factor)
-            computed = max(
-                entry_frequency_min_interval_seconds,
-                min(raw, entry_frequency_max_interval_seconds),
-            )
-        else:
-            computed = float(base_interval_seconds)
-        effective = max(computed, server_hint_seconds or 0)
-        return now + timedelta(seconds=effective)
-
-    excess = max(0, feed.consecutive_failures - broken_threshold)
-    factor = 2**excess
-    raw_interval = base_interval_seconds * factor
-    capped = min(raw_interval, broken_max_backoff_seconds)
-    jitter_span = backoff_jitter_ratio * capped
-    jitter = random.uniform(-jitter_span, jitter_span)
-    return now + timedelta(seconds=capped + jitter)
-
-
-# Content types that unambiguously indicate "this is not a feed".
-# We intentionally do NOT maintain an allow-list because many feeds
-# serve odd values like ``application/octet-stream`` (Python Insider)
-# or omit the header entirely; feedparser handles those just fine.
-# ``text/plain`` is also allowed: GitHub raw URLs always serve files
-# that way under their nosniff policy, while the body can still be valid
-# RSS/Atom XML that feedparser parses correctly.
-NOT_A_FEED_CONTENT_TYPES: frozenset[str] = frozenset(
-    {
-        "text/html",
-        "application/xhtml+xml",
-        "application/json",
-        "application/ld+json",
-    }
-)
-
-
-def _is_not_a_feed_content_type(ct: str | None) -> bool:
-    """Return True if the Content-Type header is clearly not a feed."""
-    if not ct:
-        return False
-    base = ct.split(";", 1)[0].strip().lower()
-    return base in NOT_A_FEED_CONTENT_TYPES
-
-
-def _parse_retry_after(header: str | None, *, now: datetime) -> int | None:
-    """Parse ``Retry-After`` per RFC 7231 §7.1.3.
-
-    Accepts either the integer-seconds form (``"120"``) or the
-    HTTP-date form (``"Wed, 11 Apr 2026 07:30:00 GMT"``). Cloudflare,
-    GitHub, and other large origins emit the date form in production,
-    so supporting only seconds would silently drop the signal and
-    hammer the upstream at base interval instead of honoring the
-    requested delay.
-
-    Returns the delay in seconds relative to ``now``, clamped at zero
-    (a past date returns ``0``, not a negative number). Returns
-    ``None`` when the header is absent or unparseable in either form.
-    """
-    if header is None:
-        return None
-    stripped = header.strip()
-    try:
-        return max(0, int(stripped))
-    except ValueError:
-        pass
-    # HTTP-date form (RFC 7231 §7.1.1.1). email.utils handles all three
-    # legal date formats — IMF-fixdate, RFC 850, asctime.
-    try:
-        parsed = parsedate_to_datetime(stripped)
-    except (TypeError, ValueError):
-        return None
-    # Dates without an explicit timezone are treated as UTC per RFC 7231.
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    delta_seconds = (parsed - now).total_seconds()
-    return max(0, int(delta_seconds))
-
-
-def _parse_cache_hint(headers: httpx.Headers, *, now: datetime) -> int | None:
-    """Parse Cache-Control max-age or Expires.
-
-    Returns seconds from now, or None if absent/unparseable.
-    """
-    cc = headers.get("cache-control", "")
-    for part in cc.split(","):
-        stripped = part.strip()
-        if stripped.lower().startswith("max-age="):
-            try:
-                return max(0, int(stripped[8:]))
-            except ValueError:
-                pass
-    expires = headers.get("expires")
-    if expires:
-        try:
-            parsed_dt = parsedate_to_datetime(expires)
-            if parsed_dt.tzinfo is None:
-                parsed_dt = parsed_dt.replace(tzinfo=UTC)
-            return max(0, int((parsed_dt - now).total_seconds()))
-        except (TypeError, ValueError):
-            pass
-    return None
-
-
-def _classify_error(exc: BaseException) -> ErrorCode:
-    """Map a fetch exception to a short error code."""
-    if isinstance(exc, BlockedURLError):
-        return ErrorCode.BLOCKED
-    if isinstance(exc, NotAFeedError):
-        return ErrorCode.NOT_A_FEED
-    if isinstance(exc, ResponseTooLargeError):
-        return ErrorCode.TOO_LARGE
-    if isinstance(exc, FallbackError):
-        cause = exc.__cause__ or exc.__context__
-        if isinstance(cause, ResponseTooLargeError):
-            return ErrorCode.TOO_LARGE
-        return ErrorCode.OTHER
-    if isinstance(exc, httpx.TimeoutException | TimeoutError):
-        return ErrorCode.TIMEOUT
-    if isinstance(exc, httpx.ConnectError):
-        return _classify_connect_cause(exc)
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        if status == 410:
-            return ErrorCode.HTTP_410
-        if 400 <= status < 500:
-            return ErrorCode.HTTP_4XX
-        return ErrorCode.HTTP_5XX
-    if isinstance(exc, httpx.TooManyRedirects):
-        return ErrorCode.REDIRECT_LOOP
-    if isinstance(exc, httpx.HTTPError):
-        return ErrorCode.HTTP_ERROR
-    return ErrorCode.OTHER
-
-
-def _classify_connect_cause(exc: httpx.ConnectError) -> ErrorCode:
-    """Classify connect failures by traversing cause/context chain."""
-    current: BaseException | None = exc
-    seen: set[int] = set()
-
-    for _ in range(8):
-        if current is None:
-            break
-        if isinstance(current, ssl.SSLError):
-            return ErrorCode.TLS_ERROR
-        if isinstance(current, socket.gaierror):
-            return ErrorCode.DNS
-        if isinstance(current, ConnectionRefusedError):
-            return ErrorCode.TCP_REFUSED
-
-        current_id = id(current)
-        if current_id in seen:
-            break
-        seen.add(current_id)
-
-        next_exc = current.__cause__ or current.__context__
-        current = next_exc if isinstance(next_exc, BaseException) else None
-
-    return ErrorCode.CONNECTION
+__all__ = [
+    "NotAFeedError",
+    "ResponseTooLargeError",
+    "fetch_one",
+]
 
 
 async def fetch_one(
@@ -340,8 +149,8 @@ async def fetch_one(
                         feed.status = FeedStatus.ACTIVE
                         feed.consecutive_failures = 0
                         feed.last_error_code = None
-                    _server_hint = _parse_cache_hint(response.headers, now=now)
-                    feed.next_fetch_at = _compute_next_fetch_at(
+                    _server_hint = parse_cache_hint(response.headers, now=now)
+                    feed.next_fetch_at = compute_next_fetch_at(
                         feed,
                         now=now,
                         base_interval_seconds=interval_seconds,
@@ -363,7 +172,7 @@ async def fetch_one(
                 # out of fetch_one early. We do NOT update
                 # last_successful_fetch_at because we didn't succeed.
                 if response.status_code == 429:
-                    retry_after = _parse_retry_after(response.headers.get("retry-after"), now=now)
+                    retry_after = parse_retry_after(response.headers.get("retry-after"), now=now)
                     wait_seconds = retry_after if retry_after is not None else 0
                     # Floor at base interval — don't hammer the upstream
                     # faster than our normal poll rate even if it says "10s".
@@ -409,7 +218,7 @@ async def fetch_one(
                     body = fallback_response.content
 
         ct = response_headers.get("content-type")
-        if _is_not_a_feed_content_type(ct):
+        if is_not_a_feed_content_type(ct):
             raise NotAFeedError(f"unexpected content-type: {ct}")
 
         parsed = await parse_feed(body)
@@ -437,12 +246,12 @@ async def fetch_one(
             feed.etag = new_etag
         if new_last_modified is not None:
             feed.last_modified = new_last_modified
-        _server_hint = _parse_cache_hint(response_headers, now=now)
+        _server_hint = parse_cache_hint(response_headers, now=now)
         if parsed.ttl_seconds is not None and parsed.ttl_seconds > 0:
             _server_hint = max(_server_hint or 0, parsed.ttl_seconds) or None
         observe_fetch("success", _t0)
     except Exception as exc:
-        code = _classify_error(exc)
+        code = classify_error(exc)
         mark_fetch_failure(
             feed,
             now=now,
@@ -464,7 +273,7 @@ async def fetch_one(
     # with ±jitter; dead feeds are filtered out by the scheduler so
     # their next_fetch_at is effectively unused but still set for
     # consistency.
-    feed.next_fetch_at = _compute_next_fetch_at(
+    feed.next_fetch_at = compute_next_fetch_at(
         feed,
         now=now,
         base_interval_seconds=interval_seconds,
@@ -477,3 +286,11 @@ async def fetch_one(
         entry_frequency_max_interval_seconds=entry_frequency_max_interval_seconds,
         entry_frequency_factor=entry_frequency_factor,
     )
+
+
+# Backwards-compatible aliases for existing tests that import private
+# names from this module. New code should import from
+# feedgate_fetcher.fetcher.errors / .policy directly.
+_classify_error = classify_error
+_compute_next_fetch_at = compute_next_fetch_at
+_parse_retry_after = parse_retry_after
