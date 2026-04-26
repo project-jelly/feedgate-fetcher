@@ -38,6 +38,13 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from feedgate_fetcher.fetcher.http import fetch_one
+from feedgate_fetcher.metrics import (
+    SCHEDULER_CLAIMED_FEEDS_TOTAL,
+    SCHEDULER_INFLIGHT_FETCHES,
+    SCHEDULER_LAST_TICK_UNIXTIME,
+    SCHEDULER_TICK_DURATION,
+    SCHEDULER_TICK_TOTAL,
+)
 from feedgate_fetcher.models import Feed, FeedStatus
 
 logger = structlog.get_logger()
@@ -64,10 +71,13 @@ async def _process_feed(
     http_client = app.state.http_client
 
     async with sem, sf() as session:
-        feed = (await session.execute(select(Feed).where(Feed.id == feed_id))).scalar_one_or_none()
-        if feed is None:
-            return True
+        SCHEDULER_INFLIGHT_FETCHES.inc()
         try:
+            feed = (
+                await session.execute(select(Feed).where(Feed.id == feed_id))
+            ).scalar_one_or_none()
+            if feed is None:
+                return True
             await fetch_one(
                 session,
                 http_client,
@@ -93,6 +103,8 @@ async def _process_feed(
             await session.rollback()
             logger.exception("fatal error in _process_feed feed_id=%s", feed_id)
             return False
+        finally:
+            SCHEDULER_INFLIGHT_FETCHES.dec()
 
 
 async def _claim_due_feeds(
@@ -219,9 +231,14 @@ async def run(
     consecutive_errors = 0
     while not stop.is_set():
         try:
-            await tick_once(app)
+            result = await tick_once(app)
+            SCHEDULER_TICK_TOTAL.labels(result="ok").inc()
+            SCHEDULER_TICK_DURATION.observe(result.duration_seconds)
+            SCHEDULER_LAST_TICK_UNIXTIME.set_to_current_time()
+            SCHEDULER_CLAIMED_FEEDS_TOTAL.inc(result.claimed)
             consecutive_errors = 0
         except Exception:
+            SCHEDULER_TICK_TOTAL.labels(result="error").inc()
             consecutive_errors += 1
             logger.exception("scheduler tick raised; continuing")
         timeout = interval

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from prometheus_client import Counter, Gauge, Histogram
@@ -30,7 +30,7 @@ FETCH_DURATION = Histogram(
     "feedgate_fetch_duration_seconds",
     "Time spent on a single feed fetch",
     ["result"],
-    buckets=[0.5, 1, 2, 5, 10, 15, 20, 30],
+    buckets=[0.5, 1, 2, 5, 10, 15, 20, 30, 45, 60],
 )
 
 
@@ -62,10 +62,32 @@ API_DURATION = Histogram(
     "feedgate_api_request_duration_seconds",
     "HTTP API request duration",
     ["method", "path"],
-    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5],
 )
 
 # ── USE: scheduler saturation ────────────────────────────────────────────────
+SCHEDULER_TICK_TOTAL = Counter(
+    "feedgate_scheduler_tick_total",
+    "Number of scheduler.tick_once invocations by result",
+    ["result"],
+)
+SCHEDULER_TICK_DURATION = Histogram(
+    "feedgate_scheduler_tick_duration_seconds",
+    "Wall-clock duration of one scheduler tick",
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
+)
+SCHEDULER_LAST_TICK_UNIXTIME = Gauge(
+    "feedgate_scheduler_last_tick_unixtime",
+    "Unix timestamp of the last completed scheduler tick",
+)
+SCHEDULER_CLAIMED_FEEDS_TOTAL = Counter(
+    "feedgate_scheduler_claimed_feeds_total",
+    "Cumulative count of feeds claimed by the scheduler (sum of SchedulerTickResult.claimed)",
+)
+SCHEDULER_INFLIGHT_FETCHES = Gauge(
+    "feedgate_scheduler_inflight_fetches",
+    "Number of feeds currently being processed by _process_feed",
+)
 SCHEDULER_DUE_FEEDS = Gauge(
     "feedgate_scheduler_due_feeds",
     "Feeds currently due for fetching (queue depth)",
@@ -95,6 +117,23 @@ FEED_STATE_TRANSITION_TOTAL = Counter(
 ENTRIES_TOTAL = Gauge(
     "feedgate_entries_total",
     "Total number of stored entries",
+)
+ACTIVE_FEED_MAX_AGE_SECONDS = Gauge(
+    "feedgate_active_feed_max_age_seconds",
+    "Maximum age in seconds of last_successful_fetch_at across active feeds",
+)
+ACTIVE_FEEDS_STALE_TOTAL = Gauge(
+    "feedgate_active_feeds_stale_total",
+    "Number of active feeds whose last_successful_fetch_at is older than threshold",
+    ["threshold_seconds"],
+)
+METRICS_COLLECTOR_LAST_SUCCESS_UNIXTIME = Gauge(
+    "feedgate_metrics_collector_last_success_unixtime",
+    "Unix timestamp of the last successful metrics collection cycle",
+)
+METRICS_COLLECTOR_ERRORS_TOTAL = Counter(
+    "feedgate_metrics_collector_errors_total",
+    "Number of failed metrics collection cycles",
 )
 
 # ── Retention ────────────────────────────────────────────────────────────────
@@ -130,6 +169,32 @@ async def _collect_state(
         ).scalar_one()
         SCHEDULER_DUE_FEEDS.set(due_count)
 
+        active_reference = func.coalesce(Feed.last_successful_fetch_at, Feed.created_at)
+        oldest_active_reference = (
+            await session.execute(
+                select(func.min(active_reference)).where(Feed.status == FeedStatus.ACTIVE)
+            )
+        ).scalar_one()
+        if oldest_active_reference is None:
+            ACTIVE_FEED_MAX_AGE_SECONDS.set(0)
+        else:
+            ACTIVE_FEED_MAX_AGE_SECONDS.set(
+                max(0.0, (now - oldest_active_reference).total_seconds())
+            )
+
+        for threshold_seconds in (1800, 3600, 86400):
+            stale_count = (
+                await session.execute(
+                    select(func.count()).where(
+                        Feed.status == FeedStatus.ACTIVE,
+                        active_reference < now - timedelta(seconds=threshold_seconds),
+                    )
+                )
+            ).scalar_one()
+            ACTIVE_FEEDS_STALE_TOTAL.labels(threshold_seconds=str(threshold_seconds)).set(
+                stale_count
+            )
+
     pool = engine.pool
     checkedout = pool.checkedout()  # type: ignore[attr-defined]
     DB_POOL_CHECKEDOUT.set(checkedout)
@@ -148,7 +213,9 @@ async def run_collector(
     while not stop.is_set():
         try:
             await _collect_state(session_factory, engine)
+            METRICS_COLLECTOR_LAST_SUCCESS_UNIXTIME.set_to_current_time()
         except Exception:
+            METRICS_COLLECTOR_ERRORS_TOTAL.inc()
             logger.debug("metrics collection failed", exc_info=True)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
