@@ -35,6 +35,7 @@ import structlog
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from feedgate_fetcher.feed_state import mark_fetch_failure, mark_fetch_success, transition_feed
 from feedgate_fetcher.fetcher.fallback import (
     FallbackError,
     FallbackResponse,
@@ -43,7 +44,6 @@ from feedgate_fetcher.fetcher.fallback import (
 from feedgate_fetcher.fetcher.parser import parse_feed
 from feedgate_fetcher.fetcher.upsert import upsert_entries
 from feedgate_fetcher.metrics import (
-    FEED_STATE_TRANSITION_TOTAL,
     FETCH_DURATION,
     FETCH_ERROR_TOTAL,
     FETCH_TOTAL,
@@ -117,27 +117,6 @@ def _compute_next_fetch_at(
     jitter_span = backoff_jitter_ratio * capped
     jitter = random.uniform(-jitter_span, jitter_span)
     return now + timedelta(seconds=capped + jitter)
-
-
-def _log_transition(feed: Feed, new_status: str, *, reason: str) -> None:
-    FEED_STATE_TRANSITION_TOTAL.labels(
-        from_status=str(feed.status),
-        to_status=str(new_status),
-        reason=reason,
-    ).inc()
-    log = (
-        logger.error
-        if str(new_status) in {FeedStatus.BROKEN.value, FeedStatus.DEAD.value}
-        else logger.warning
-    )
-    log(
-        "feed_state_transition",
-        feed_id=feed.id,
-        url=feed.effective_url,
-        old_status=feed.status,
-        new_status=new_status,
-        reason=reason,
-    )
 
 
 # Content types that unambiguously indicate "this is not a feed".
@@ -361,7 +340,7 @@ async def fetch_one(
                 if response.status_code == 304:
                     feed.last_successful_fetch_at = now
                     if feed.status == FeedStatus.BROKEN:
-                        _log_transition(feed, FeedStatus.ACTIVE, reason="http_304_recovery")
+                        transition_feed(feed, FeedStatus.ACTIVE, reason="http_304_recovery")
                         feed.status = FeedStatus.ACTIVE
                         feed.consecutive_failures = 0
                         feed.last_error_code = None
@@ -456,14 +435,7 @@ async def fetch_one(
                 entries_to_upsert = entries_to_upsert[:max_entries_initial]
             await upsert_entries(session, feed.id, entries_to_upsert, now=now)
 
-        if parsed.title:
-            feed.title = parsed.title
-        feed.last_successful_fetch_at = now
-        feed.last_error_code = None
-        feed.consecutive_failures = 0
-        if feed.status != FeedStatus.ACTIVE:
-            _log_transition(feed, FeedStatus.ACTIVE, reason="fetch_succeeded")
-            feed.status = FeedStatus.ACTIVE
+        mark_fetch_success(feed, now=now, title=parsed.title)
 
         new_etag = response_headers.get("etag")
         new_last_modified = response_headers.get("last-modified")
@@ -478,8 +450,13 @@ async def fetch_one(
         FETCH_DURATION.labels(result="success").observe(time.perf_counter() - _t0)
     except Exception as exc:
         code = _classify_error(exc)
-        feed.last_error_code = code
-        feed.consecutive_failures = feed.consecutive_failures + 1
+        mark_fetch_failure(
+            feed,
+            now=now,
+            code=code,
+            broken_threshold=broken_threshold,
+            dead_duration_days=dead_duration_days,
+        )
         logger.warning(
             "fetch_one failed feed_id=%s url=%s code=%s err=%r",
             feed.id,
@@ -490,34 +467,6 @@ async def fetch_one(
         FETCH_TOTAL.labels(result="error").inc()
         FETCH_ERROR_TOTAL.labels(error_code=code).inc()
         FETCH_DURATION.labels(result="error").observe(time.perf_counter() - _t0)
-
-        # Lifecycle transitions (spec/feed.md — circuit breaker + 410)
-        if code == ErrorCode.HTTP_410:
-            if feed.status != FeedStatus.DEAD:
-                _log_transition(feed, FeedStatus.DEAD, reason="http_410")
-                feed.status = FeedStatus.DEAD
-        else:
-            # active -> broken on threshold
-            if feed.status == FeedStatus.ACTIVE and feed.consecutive_failures >= broken_threshold:
-                _log_transition(
-                    feed,
-                    FeedStatus.BROKEN,
-                    reason=f"consecutive_failures>={broken_threshold}",
-                )
-                feed.status = FeedStatus.BROKEN
-            # broken -> dead on time since last success (fall-through
-            # allowed: if active just flipped to broken above AND the
-            # feed already has no success for dead_duration_days, we
-            # transition straight through to dead in the same call)
-            if feed.status == FeedStatus.BROKEN:
-                reference = feed.last_successful_fetch_at or feed.created_at
-                if now - reference >= timedelta(days=dead_duration_days):
-                    _log_transition(
-                        feed,
-                        FeedStatus.DEAD,
-                        reason=f"no_success_for_>={dead_duration_days}d",
-                    )
-                    feed.status = FeedStatus.DEAD
 
     # Schedule the next fetch based on the final status. Active feeds
     # use base_interval_seconds; broken feeds use exponential backoff

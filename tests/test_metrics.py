@@ -2,7 +2,7 @@ from typing import cast
 
 from structlog.testing import capture_logs
 
-from feedgate_fetcher.fetcher.http import _log_transition
+from feedgate_fetcher.feed_state import transition_feed
 from feedgate_fetcher.metrics import FEED_STATE_TRANSITION_TOTAL
 from feedgate_fetcher.models import Feed, FeedStatus
 
@@ -21,7 +21,7 @@ def test_feed_state_transition_counter_increments_on_broken() -> None:
     )._value.get()
     feed = cast(Feed, _StubFeed())
     feed.status = FeedStatus.ACTIVE
-    _log_transition(feed, FeedStatus.BROKEN, reason="consecutive_failures")
+    transition_feed(feed, FeedStatus.BROKEN, reason="consecutive_failures")
     after = FEED_STATE_TRANSITION_TOTAL.labels(
         from_status=FeedStatus.ACTIVE.value,
         to_status=FeedStatus.BROKEN.value,
@@ -34,7 +34,7 @@ def test_feed_state_transition_counter_logs_at_error_for_broken() -> None:
     feed = cast(Feed, _StubFeed())
     feed.status = FeedStatus.ACTIVE
     with capture_logs() as logs:
-        _log_transition(feed, FeedStatus.BROKEN, reason="consecutive_failures")
+        transition_feed(feed, FeedStatus.BROKEN, reason="consecutive_failures")
     assert any(record.get("log_level") == "error" for record in logs)
 
 
@@ -42,6 +42,6 @@ def test_feed_state_transition_counter_logs_at_warning_for_active_recovery() -> 
     feed = cast(Feed, _StubFeed())
     feed.status = FeedStatus.BROKEN
     with capture_logs() as logs:
-        _log_transition(feed, FeedStatus.ACTIVE, reason="fetch_succeeded")
+        transition_feed(feed, FeedStatus.ACTIVE, reason="fetch_succeeded")
     assert any(record.get("log_level") == "warning" for record in logs)
     assert not any(record.get("log_level") == "error" for record in logs)
