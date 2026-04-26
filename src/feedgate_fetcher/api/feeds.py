@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate_fetcher.api import get_session
+from feedgate_fetcher.api.dependencies import get_session
 from feedgate_fetcher.config import get_settings
 from feedgate_fetcher.feed_state import transition_feed
 from feedgate_fetcher.models import Feed, FeedStatus

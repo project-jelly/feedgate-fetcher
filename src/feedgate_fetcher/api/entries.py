@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from feedgate_fetcher.api import get_session
+from feedgate_fetcher.api.dependencies import get_session
 from feedgate_fetcher.models import Entry
 from feedgate_fetcher.schemas import EntryResponse, PaginatedEntries
 
